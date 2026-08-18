@@ -1,0 +1,780 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Post {
+  id        Int      @id @default(autoincrement())
+  title     String
+  content   String?
+  published Boolean? @default(false)
+  authorId  Int?
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum PlanCode {
+  FREE
+  BASIC
+  PRO
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+enum BusinessStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum LocationStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MANAGER
+  WAITER
+  KITCHEN
+  CASHIER
+}
+
+enum WorkstationStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum CategoryStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ComboStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum TableStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ModifierGroupStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum TableSessionStatus {
+  OPEN
+  CLOSING
+  CLOSED
+  CANCELLED
+}
+
+enum OrderType {
+  DINE_IN
+  TAKEAWAY
+}
+
+enum OrderStatus {
+  DRAFT
+  SENT
+  IN_PROGRESS
+  READY
+  DELIVERED
+  CLOSED
+  CANCELLED
+}
+
+enum OrderItemStatus {
+  PENDING
+  SENT
+  IN_PREPARATION
+  READY
+  DELIVERED
+  CANCELLED
+}
+
+enum PreparationTicketStatus {
+  PENDING
+  ACCEPTED
+  IN_PROGRESS
+  READY
+  CANCELLED
+}
+
+enum BillStatus {
+  OPEN
+  PARTIALLY_PAID
+  PAID
+  UNPAID
+  VOID
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  TRANSFER
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  CANCELLED
+}
+
+enum CashSessionStatus {
+  OPEN
+  CLOSED
+}
+
+enum CashMovementType {
+  SALE
+  HANDOVER
+  WITHDRAWAL
+  DEPOSIT
+  ADJUSTMENT
+}
+
+enum CashHandoverStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  STATUS_CHANGE
+  PAYMENT_CONFIRMED
+  PAYMENT_REJECTED
+  PAYMENT_CANCELLED
+  CASH_HANDOVER
+  CASH_SESSION_OPENED
+  CASH_SESSION_CLOSED
+}
+
+// ============================================================
+// TENANCY
+// ============================================================
+
+model Business {
+  id        String         @id @default(uuid())
+  name      String
+  taxId     String?
+  status    BusinessStatus @default(ACTIVE)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  locations   Location[]
+  memberships Membership[]
+  auditLogs   AuditLog[]
+
+  @@index([status])
+}
+
+model Location {
+  id         String         @id @default(uuid())
+  businessId String
+  name       String
+  address    String?
+  timezone   String         @default("America/Santiago")
+  currency   String         @default("CLP")
+  status     LocationStatus @default(ACTIVE)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  workstations   Workstation[]
+  categories     Category[]
+  products       Product[]
+  combos         Combo[]
+  tables         RestaurantTable[]
+  orders         Order[]
+  bills          Bill[]
+  cashSessions   CashSession[]
+  modifierGroups ModifierGroup[]
+  auditLogs      AuditLog[]
+  suscription    Subscription?
+
+  @@index([businessId])
+  @@index([businessId, status])
+}
+
+// ============================================================
+// IDENTITY
+// ============================================================
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  firstName String
+  lastName  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships Membership[]
+
+  ordersCreated         Order[]        @relation("OrderCreatedBy")
+  waiterOrders          Order[]        @relation("OrderWaiter")
+  tableSessions         TableSession[] @relation("TableSessionWaiter")
+  appliedDiscounts      Discount[]     @relation("DiscountAppliedBy")
+  cashHandovers         CashHandover[] @relation("CashHandoverWaiter")
+  receivedCashHandovers CashHandover[] @relation("CashHandoverReceiver")
+  cashSessionsOpened    CashSession[]  @relation("CashSessionOpenedBy")
+  cashSessionsClosed    CashSession[]  @relation("CashSessionClosedBy")
+  cashMovements         CashMovement[]
+  cashHandoversCreated  CashHandover[] @relation("CashHandoverCreatedBy")
+  auditLogs             AuditLog[]
+
+  @@index([email])
+}
+
+model Membership {
+  id         String           @id @default(uuid())
+  userId     String
+  businessId String
+  role       Role
+  status     MembershipStatus @default(ACTIVE)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, businessId, role])
+  @@index([businessId, status])
+  @@index([userId, status])
+}
+
+// ============================================================
+// SUSCRIPTION
+// ============================================================
+
+model Plan {
+  id          String   @id @default(uuid())
+  code        PlanCode @unique
+  name        String
+  description String?
+  price       Decimal  @db.Decimal(12, 2)
+
+  maxLocations Int?
+  maxUsers     Int?
+  maxProducts  Int?
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id         String @id @default(uuid())
+  locationId String @unique
+  planId     String
+
+  status SubscriptionStatus @default(ACTIVE)
+
+  startedAt          DateTime  @default(now())
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+
+  cancelledAt DateTime?
+
+  externalCustomerId     String?
+  externalSubscriptionId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  plan     Plan     @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([planId])
+  @@index([status])
+  @@index([status, currentPeriodEnd])
+}
+
+// ============================================================
+// CATALOG
+// ============================================================
+
+model Workstation {
+  id         String            @id @default(uuid())
+  locationId String
+  name       String
+  status     WorkstationStatus @default(ACTIVE)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  productWorkstations ProductWorkstation[]
+  preparationTickets  PreparationTicket[]
+
+  @@unique([locationId, name])
+  @@index([locationId, status])
+}
+
+model Category {
+  id         String         @id @default(uuid())
+  locationId String
+  name       String
+  status     CategoryStatus @default(ACTIVE)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  products Product[]
+
+  @@unique([locationId, name])
+  @@index([locationId, status])
+}
+
+model Product {
+  id          String        @id @default(uuid())
+  locationId  String
+  categoryId  String?
+  name        String
+  description String?
+  price       Decimal       @db.Decimal(12, 2)
+  status      ProductStatus @default(ACTIVE)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  location Location  @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  productWorkstations ProductWorkstation[]
+  comboItems          ComboItem[]
+  orderItems          OrderItem[]
+  modifiers           Modifier[]
+
+  @@index([locationId, status])
+  @@index([categoryId, status])
+}
+
+model ProductWorkstation {
+  id            String @id @default(uuid())
+  productId     String
+  workstationId String
+
+  product     Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  workstation Workstation @relation(fields: [workstationId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, workstationId])
+  @@index([workstationId])
+}
+
+model Combo {
+  id          String      @id @default(uuid())
+  locationId  String
+  name        String
+  description String?
+  price       Decimal     @db.Decimal(12, 2)
+  status      ComboStatus @default(ACTIVE)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  items ComboItem[]
+
+  @@unique([locationId, name])
+  @@index([locationId, status])
+}
+
+model ComboItem {
+  id        String @id @default(uuid())
+  comboId   String
+  productId String
+  quantity  Int
+
+  combo   Combo   @relation(fields: [comboId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@unique([comboId, productId])
+  @@index([productId])
+}
+
+model ModifierGroup {
+  id            String              @id @default(uuid())
+  locationId    String
+  name          String
+  minSelections Int                 @default(0)
+  maxSelections Int?
+  status        ModifierGroupStatus @default(ACTIVE)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  location  Location   @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  modifiers Modifier[]
+
+  @@unique([locationId, name])
+}
+
+model Modifier {
+  id         String  @id @default(uuid())
+  groupId    String
+  productId  String
+  name       String
+  priceDelta Decimal @default(0) @db.Decimal(12, 2)
+  active     Boolean @default(true)
+
+  group   ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  product Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  orderItemModifiers OrderItemModifier[]
+
+  @@unique([productId, groupId, name])
+  @@index([productId, active])
+  @@index([groupId, active])
+}
+
+// ============================================================
+// TABLES
+// ============================================================
+
+model RestaurantTable {
+  id         String      @id @default(uuid())
+  locationId String
+  name       String
+  capacity   Int?
+  status     TableStatus @default(ACTIVE)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  sessions TableSession[]
+
+  @@unique([locationId, name])
+  @@index([locationId, status])
+}
+
+model TableSession {
+  id       String             @id @default(uuid())
+  tableId  String
+  waiterId String
+  status   TableSessionStatus @default(OPEN)
+  openedAt DateTime           @default(now())
+  closedAt DateTime?
+
+  table  RestaurantTable @relation(fields: [tableId], references: [id], onDelete: Restrict)
+  waiter User            @relation("TableSessionWaiter", fields: [waiterId], references: [id], onDelete: Restrict)
+
+  orders Order[]
+
+  @@index([tableId, status])
+  @@index([waiterId, status])
+}
+
+// ============================================================
+// ORDERS
+// ============================================================
+
+model Order {
+  id             String      @id @default(uuid())
+  locationId     String
+  tableSessionId String?
+  createdBy      String
+  waiterId       String?
+  type           OrderType
+  status         OrderStatus @default(DRAFT)
+  customerName   String?
+  notes          String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  location      Location      @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  tableSession  TableSession? @relation(fields: [tableSessionId], references: [id], onDelete: Restrict)
+  waiter        User?         @relation("OrderWaiter", fields: [waiterId], references: [id], onDelete: Restrict)
+  createdByUser User          @relation("OrderCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+
+  items              OrderItem[]
+  preparationTickets PreparationTicket[]
+  billOrders         BillOrder[]
+
+  @@index([locationId, status])
+  @@index([locationId, type, status])
+  @@index([tableSessionId])
+  @@index([createdBy, status])
+  @@index([waiterId, status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id                  String          @id @default(uuid())
+  orderId             String
+  productId           String
+  productNameSnapshot String
+  unitPrice           Decimal         @db.Decimal(12, 2)
+  quantity            Int
+  notes               String?
+  status              OrderItemStatus @default(PENDING)
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  modifiers   OrderItemModifier[]
+  ticketItems PreparationTicketItem[]
+
+  @@index([orderId, status])
+  @@index([productId])
+}
+
+model OrderItemModifier {
+  id           String  @id @default(uuid())
+  orderItemId  String
+  modifierId   String
+  nameSnapshot String
+  priceDelta   Decimal @db.Decimal(12, 2)
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  modifier  Modifier  @relation(fields: [modifierId], references: [id], onDelete: Restrict)
+
+  @@index([orderItemId])
+}
+
+model PreparationTicket {
+  id            String                  @id @default(uuid())
+  orderId       String
+  workstationId String
+  status        PreparationTicketStatus @default(PENDING)
+  createdAt     DateTime                @default(now())
+  startedAt     DateTime?
+  readyAt       DateTime?
+  cancelledAt   DateTime?
+
+  order       Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  workstation Workstation @relation(fields: [workstationId], references: [id], onDelete: Restrict)
+
+  items PreparationTicketItem[]
+
+  @@unique([orderId, workstationId])
+  @@index([workstationId, status])
+  @@index([orderId])
+}
+
+model PreparationTicketItem {
+  id          String @id @default(uuid())
+  ticketId    String
+  orderItemId String
+  quantity    Int
+
+  ticket    PreparationTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  orderItem OrderItem         @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  @@unique([ticketId, orderItemId])
+  @@index([orderItemId])
+}
+
+// ============================================================
+// BILLING
+// ============================================================
+
+model Bill {
+  id            String     @id @default(uuid())
+  locationId    String
+  status        BillStatus @default(OPEN)
+  subtotal      Decimal    @db.Decimal(12, 2)
+  discountTotal Decimal    @default(0) @db.Decimal(12, 2)
+  tipAmount     Decimal    @default(0) @db.Decimal(12, 2)
+  total         Decimal    @db.Decimal(12, 2)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  location  Location    @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  orders    BillOrder[]
+  discounts Discount[]
+  payments  Payment[]
+
+  @@index([locationId, status])
+  @@index([createdAt])
+}
+
+model BillOrder {
+  billId  String
+  orderId String
+
+  bill  Bill  @relation(fields: [billId], references: [id], onDelete: Cascade)
+  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@id([billId, orderId])
+  @@index([orderId])
+}
+
+model Discount {
+  id        String       @id @default(uuid())
+  billId    String
+  type      DiscountType
+  value     Decimal      @db.Decimal(12, 2)
+  amount    Decimal      @db.Decimal(12, 2)
+  reason    String
+  appliedBy String
+  createdAt DateTime     @default(now())
+
+  bill          Bill @relation(fields: [billId], references: [id], onDelete: Cascade)
+  appliedByUser User @relation("DiscountAppliedBy", fields: [appliedBy], references: [id], onDelete: Restrict)
+
+  @@index([billId])
+  @@index([appliedBy])
+}
+
+model Payment {
+  id           String        @id @default(uuid())
+  billId       String
+  method       PaymentMethod
+  status       PaymentStatus @default(PENDING)
+  amount       Decimal       @db.Decimal(12, 2)
+  reference    String?
+  confirmedAt  DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  cashHandover CashHandover?
+
+  bill Bill @relation(fields: [billId], references: [id], onDelete: Restrict)
+
+  @@index([billId, status])
+  @@index([method, status])
+  @@index([createdAt])
+}
+
+// ============================================================
+// CASH
+// ============================================================
+
+model CashSession {
+  id             String            @id @default(uuid())
+  locationId     String
+  openedBy       String
+  closedBy       String?
+  status         CashSessionStatus @default(OPEN)
+  openedAt       DateTime          @default(now())
+  closedAt       DateTime?
+  openingAmount  Decimal           @db.Decimal(12, 2)
+  closingAmount  Decimal?          @db.Decimal(12, 2)
+  expectedAmount Decimal?          @db.Decimal(12, 2)
+  difference     Decimal?          @db.Decimal(12, 2)
+
+  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  opener   User     @relation("CashSessionOpenedBy", fields: [openedBy], references: [id], onDelete: Restrict)
+  closer   User?    @relation("CashSessionClosedBy", fields: [closedBy], references: [id], onDelete: Restrict)
+
+  movements CashMovement[]
+  handovers CashHandover[]
+
+  @@index([locationId, status])
+  @@index([openedAt])
+}
+
+model CashMovement {
+  id            String           @id @default(uuid())
+  cashSessionId String
+  type          CashMovementType
+  amount        Decimal          @db.Decimal(12, 2)
+  reason        String?
+  reference     String?
+  createdBy     String
+  createdAt     DateTime         @default(now())
+
+  cashSession CashSession @relation(fields: [cashSessionId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [createdBy], references: [id], onDelete: Restrict)
+
+  @@index([cashSessionId, createdAt])
+  @@index([type])
+}
+
+model CashHandover {
+  id            String             @id @default(uuid())
+  cashSessionId String
+  paymentId     String             @unique
+  waiterId      String
+  createdBy     String
+  receivedBy    String?
+  amount        Decimal            @db.Decimal(12, 2)
+  status        CashHandoverStatus @default(PENDING)
+  rejectReason  String?
+  createdAt     DateTime           @default(now())
+  confirmedAt   DateTime?
+
+  cashSession CashSession @relation(fields: [cashSessionId], references: [id], onDelete: Cascade)
+  payment     Payment     @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  waiter      User        @relation("CashHandoverWaiter", fields: [waiterId], references: [id], onDelete: Restrict)
+  receiver    User?       @relation("CashHandoverReceiver", fields: [receivedBy], references: [id], onDelete: Restrict)
+  creator     User        @relation("CashHandoverCreatedBy", fields: [createdBy], references: [id], onDelete: Restrict)
+
+  @@index([cashSessionId, createdAt])
+  @@index([paymentId])
+  @@index([waiterId, createdAt])
+  @@index([createdBy, createdAt])
+  @@index([status])
+}
+
+// ============================================================
+// AUDIT
+// ============================================================
+
+model AuditLog {
+  id         String      @id @default(uuid())
+  businessId String
+  locationId String?
+  userId     String?
+  action     AuditAction
+  entityType String
+  entityId   String
+  metadata   Json?
+  createdAt  DateTime    @default(now())
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  location Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, createdAt])
+  @@index([locationId, createdAt])
+  @@index([entityType, entityId])
+  @@index([userId, createdAt])
+}

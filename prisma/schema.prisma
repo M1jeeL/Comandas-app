@@ -281,7 +281,7 @@ model Membership {
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, businessId, role])
+  @@unique([userId, businessId])
   @@index([businessId, status])
   @@index([userId, status])
 }

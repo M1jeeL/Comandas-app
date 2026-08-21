@@ -1,4 +1,9 @@
-import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
+import {
+  CanActivate,
+  ExecutionContext,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 
 import { ROLES_KEY } from '../../modules/auth/decorators/roles.decorators.js';
@@ -15,6 +20,10 @@ export class RolesGuard implements CanActivate {
       context.getClass(),
     ]);
 
+    /**
+     * Si el endpoint no declara roles,
+     * no aplicamos restricciones RBAC.
+     */
     if (!requiredRoles || requiredRoles.length === 0) {
       return true;
     }
@@ -24,6 +33,14 @@ export class RolesGuard implements CanActivate {
     }>();
 
     const user = request.user;
+
+    /**
+     * El endpoint requiere roles pero
+     * no existe usuario autenticado.
+     */
+    if (!user) {
+      throw new UnauthorizedException('Usuario no autenticado');
+    }
 
     return requiredRoles.includes(user.role);
   }

@@ -95,6 +95,8 @@ export class OrdersService {
     if (!waiterId) {
       return;
     }
+    
+    
 
     if (waiterId !== user.userId) {
       throw new ForbiddenException(

@@ -23,7 +23,6 @@ export class AuthController {
 
   @Get('me')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.OWNER)
   me(@CurrentUser() user: JwtUser) {
     return user;
   }

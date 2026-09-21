@@ -177,20 +177,152 @@ enum CashHandoverStatus {
 }
 
 enum AuditAction {
+  // ============================================================
+  // GENERIC
+  // ============================================================
+
   CREATE
   UPDATE
   DELETE
+  STATUS_CHANGE
+
+  // ============================================================
+  // AUTH
+  // ============================================================
+
   LOGIN
   LOGOUT
-  STATUS_CHANGE
+
+  // ============================================================
+  // ORDERS
+  // ============================================================
+
+  ORDER_CREATED
+  ORDER_SENT
+  ORDER_CANCELLED
+  ORDER_READY
+  ORDER_DELIVERED
+  ORDER_CLOSED
+
+  ORDER_ITEM_ADDED
+  ORDER_ITEM_UPDATED
+  ORDER_ITEM_CANCELLED
+
+  // ============================================================
+  // PREPARATION TICKETS
+  // ============================================================
+
+  PREPARATION_TICKET_CREATED
+  PREPARATION_TICKET_STARTED
+  PREPARATION_TICKET_READY
+  PREPARATION_TICKET_CANCELLED
+
+  // ============================================================
+  // BILLS
+  // ============================================================
+
+  BILL_CREATED
+  BILL_UPDATED
+  BILL_CANCELLED
+
+  // ============================================================
+  // PAYMENTS
+  // ============================================================
+
+  PAYMENT_CREATED
   PAYMENT_CONFIRMED
   PAYMENT_REJECTED
   PAYMENT_CANCELLED
-  CASH_HANDOVER
+  PAYMENT_REFUNDED
+
+  // ============================================================
+  // CASH
+  // ============================================================
+
   CASH_SESSION_OPENED
   CASH_SESSION_CLOSED
-}
 
+  CASH_HANDOVER_CREATED
+  CASH_HANDOVER_ACCEPTED
+  CASH_HANDOVER_REJECTED
+  CASH_HANDOVER_CANCELLED
+
+  CASH_MOVEMENT_CREATED
+  CASH_MOVEMENT_REVERSED
+  CASH_ADJUSTMENT
+
+  // ============================================================
+  // TABLES
+  // ============================================================
+
+  TABLE_CREATED
+  TABLE_UPDATED
+  TABLE_DEACTIVATED
+
+  TABLE_SESSION_OPENED
+  TABLE_SESSION_UPDATED
+  TABLE_SESSION_CLOSED
+
+  // ============================================================
+  // CATALOG
+  // ============================================================
+
+  PRODUCT_CREATED
+  PRODUCT_UPDATED
+  PRODUCT_DEACTIVATED
+
+  CATEGORY_CREATED
+  CATEGORY_UPDATED
+  CATEGORY_DEACTIVATED
+
+  MODIFIER_GROUP_CREATED
+  MODIFIER_GROUP_UPDATED
+  MODIFIER_GROUP_DEACTIVATED
+
+  MODIFIER_CREATED
+  MODIFIER_UPDATED
+  MODIFIER_DEACTIVATED
+
+  // ============================================================
+  // USERS / MEMBERSHIPS
+  // ============================================================
+
+  USER_CREATED
+  USER_UPDATED
+  USER_DEACTIVATED
+
+  MEMBERSHIP_CREATED
+  MEMBERSHIP_UPDATED
+  MEMBERSHIP_DEACTIVATED
+  MEMBERSHIP_ROLE_CHANGED
+
+  // ============================================================
+  // DISCOUNTS
+  // ============================================================
+
+  DISCOUNT_CREATED
+  DISCOUNT_UPDATED
+  DISCOUNT_DEACTIVATED
+  DISCOUNT_APPLIED
+  DISCOUNT_REMOVED
+
+  // ============================================================
+  // BUSINESS / LOCATION
+  // ============================================================
+
+  BUSINESS_CREATED
+  BUSINESS_UPDATED
+
+  LOCATION_CREATED
+  LOCATION_UPDATED
+  LOCATION_DEACTIVATED
+
+  // ============================================================
+  // CONFIGURATION
+  // ============================================================
+
+  CONFIGURATION_UPDATED
+}
 // ============================================================
 // TENANCY
 // ============================================================

@@ -27,18 +27,10 @@ import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 export class ModifiersController {
   constructor(private readonly modifiersService: ModifiersService) {}
 
-  // ============================================================
-  // CREATE
-  // ============================================================
-
   @Post()
   create(@CurrentUser() user: JwtUser, @Body() dto: CreateModifierDto) {
     return this.modifiersService.create(user, dto);
   }
-
-  // ============================================================
-  // FIND ALL
-  // ============================================================
 
   @Get()
   findAll(
@@ -53,10 +45,6 @@ export class ModifiersController {
     return this.modifiersService.findAll(user, productId, groupId);
   }
 
-  // ============================================================
-  // FIND ONE
-  // ============================================================
-
   @Get(':id')
   findOne(
     @CurrentUser() user: JwtUser,
@@ -64,10 +52,6 @@ export class ModifiersController {
   ) {
     return this.modifiersService.findOne(user, id);
   }
-
-  // ============================================================
-  // UPDATE
-  // ============================================================
 
   @Patch(':id')
   update(
@@ -77,10 +61,6 @@ export class ModifiersController {
   ) {
     return this.modifiersService.update(user, id, dto);
   }
-
-  // ============================================================
-  // DELETE
-  // ============================================================
 
   @Delete(':id')
   remove(@CurrentUser() user: JwtUser, @Param('id', ParseUUIDPipe) id: string) {

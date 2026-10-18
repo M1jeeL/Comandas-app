@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:18
+    container_name: emb-manager-db
+    environment:
+      POSTGRES_USER: emb_manager
+      POSTGRES_PASSWORD: supersecretpassword
+      POSTGRES_DB: emb_manager
+    ports:
+      - "5332:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+
+volumes:
+  postgres_data:

@@ -1,7 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
-import { PostsModule } from './modules/posts/posts.module.js';
 import { PrismaService } from './prisma.service.js';
 import { HealthModule } from './modules/health/health.module.js';
 import { ConfigModule } from '@nestjs/config';
@@ -30,6 +29,8 @@ import { CashMovementsModule } from './modules/cash-movements/cash-movements.mod
 import { CashHandoversModule } from './modules/cash-handovers/cash-handovers.module.js';
 import { AuditModule } from './modules/audit/audit.module.js';
 import { ReportsModule } from './modules/reports/reports.module.js';
+import { LocationScopeGuard } from './common/guards/location-scope.guard.js';
+import { ScopedJwtAuthGuard } from './common/guards/scoped-jwt-auth.guard.js';
 
 @Global()
 @Module({
@@ -37,7 +38,6 @@ import { ReportsModule } from './modules/reports/reports.module.js';
     ConfigModule.forRoot({
       isGlobal: true,
     }),
-    PostsModule,
     HealthModule,
     ProductsModule,
     UsersModule,
@@ -66,7 +66,7 @@ import { ReportsModule } from './modules/reports/reports.module.js';
     ReportsModule,
   ],
   controllers: [AppController],
-  providers: [AppService, PrismaService],
-  exports: [PrismaService, AppService],
+  providers: [AppService, PrismaService, LocationScopeGuard, ScopedJwtAuthGuard],
+  exports: [PrismaService, AppService, LocationScopeGuard, ScopedJwtAuthGuard],
 })
 export class AppModule {}

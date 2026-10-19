@@ -12,14 +12,14 @@ import { CashMovementsService } from './cash-movements.service.js';
 
 import { CreateCashMovementDto } from './dto/create-cash-movement.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 @Controller('cash-sessions/:cashSessionId/movements')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class CashMovementsController {
   constructor(private readonly cashMovementsService: CashMovementsService) {}
 

@@ -16,16 +16,17 @@ import { OrdersService } from './orders.service.js';
 import { CreateOrderDto } from './dto/create-order.dto.js';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 import { AddOrderItemDto } from './dto/add-order-item.dto.js';
 import { UpdateOrderItemDto } from './dto/update-order-item.dto.js';
+import { RequestItemCancellationDto } from './dto/request-item-cancellation.dto.js';
 
 @Controller('orders')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
@@ -77,6 +78,16 @@ export class OrdersController {
     @Param('itemId', ParseUUIDPipe) itemId: string,
   ) {
     return this.ordersService.removeItem(user, orderId, itemId);
+  }
+
+  @Post(':orderId/items/:itemId/cancellation-request')
+  requestItemCancellation(
+    @CurrentUser() user: JwtUser,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @Body() dto: RequestItemCancellationDto,
+  ) {
+    return this.ordersService.requestItemCancellation(user, orderId, itemId, dto);
   }
 
   @Patch(':id/status')

@@ -16,16 +16,22 @@ import {
   OrderStatus,
   OrderType,
   PreparationTicketStatus,
+  Role,
 } from '../../generated/prisma/enums.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 import { UpdateOrderItemDto } from './dto/update-order-item.dto.js';
+import { RequestItemCancellationDto } from './dto/request-item-cancellation.dto.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { AuditService } from '../audit/audit.service.js';
+import { serializableTransaction } from '../../common/database/serializable-transaction.js';
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * Verifica que la ubicación pertenezca
@@ -96,8 +102,6 @@ export class OrdersService {
     if (!waiterId) {
       return;
     }
-    
-    
 
     if (waiterId !== user.userId) {
       throw new ForbiddenException(
@@ -139,6 +143,11 @@ export class OrdersService {
     tx: Prisma.TransactionClient,
     orderId: string,
   ) {
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { locationId: true },
+    });
+    if (!order) throw new NotFoundException('Pedido no encontrado');
     // 1. Obtener los OrderItems activos de la orden.
     const orderItems = await tx.orderItem.findMany({
       where: {
@@ -198,6 +207,19 @@ export class OrdersService {
           `El producto "${product.name}" no tiene una workstation configurada`,
         );
       }
+      if (product.productWorkstations.length !== 1) {
+        throw new ConflictException(
+          `El producto "${product.name}" tiene más de una estación. Corrige su asignación antes de enviar el pedido`,
+        );
+      }
+      if (
+        product.productWorkstations[0].workstation.locationId !==
+        order.locationId
+      ) {
+        throw new ConflictException(
+          `La estación del producto "${product.name}" pertenece a otro local`,
+        );
+      }
     }
 
     // 5. Agrupar los OrderItems por workstation.
@@ -215,21 +237,25 @@ export class OrdersService {
     for (const orderItem of orderItems) {
       const product = productsMap.get(orderItem.productId)!;
 
-      for (const productWorkstation of product.productWorkstations) {
-        const workstationId = productWorkstation.workstationId;
+      const productWorkstation = product.productWorkstations[0];
+      if (productWorkstation.workstation.status !== 'ACTIVE') {
+        throw new ConflictException(
+          `La estación del producto "${product.name}" está inactiva`,
+        );
+      }
+      const workstationId = productWorkstation.workstationId;
 
-        if (!workstationItems.has(workstationId)) {
-          workstationItems.set(workstationId, {
-            workstationId,
-            items: [],
-          });
-        }
-
-        workstationItems.get(workstationId)!.items.push({
-          orderItemId: orderItem.id,
-          quantity: orderItem.quantity,
+      if (!workstationItems.has(workstationId)) {
+        workstationItems.set(workstationId, {
+          workstationId,
+          items: [],
         });
       }
+
+      workstationItems.get(workstationId)!.items.push({
+        orderItemId: orderItem.id,
+        quantity: orderItem.quantity,
+      });
     }
 
     // 6. Crear un ticket por workstation.
@@ -401,9 +427,120 @@ export class OrdersService {
     }
 
     if (order.status !== OrderStatus.DRAFT) {
-      throw new ConflictException(
-        'Solo se pueden modificar items de pedidos en estado DRAFT',
-      );
+      if (
+        (order.status !== OrderStatus.SENT &&
+          order.status !== OrderStatus.IN_PROGRESS) ||
+        dto.notes === undefined ||
+        dto.quantity !== undefined ||
+        dto.modifierIds !== undefined
+      ) {
+        throw new ConflictException(
+          'Después del envío solo se puede actualizar la nota del ítem, y la estación debe seguir trabajando en la comanda',
+        );
+      }
+      if (user.role === Role.WAITER && order.waiterId !== user.userId) {
+        throw new ForbiddenException(
+          'Solo el mesero asignado puede modificar este pedido',
+        );
+      }
+      if (
+        user.role !== Role.WAITER &&
+        user.role !== Role.OWNER &&
+        user.role !== Role.ADMIN &&
+        user.role !== Role.MANAGER
+      ) {
+        throw new ForbiddenException(
+          'Tu rol no puede modificar ítems enviados a preparación',
+        );
+      }
+      const item = await this.prisma.orderItem.findFirst({
+        where: { id: itemId, orderId: order.id },
+      });
+      if (!item)
+        throw new NotFoundException('Item no encontrado en este pedido');
+      const ticketItem = await this.prisma.preparationTicketItem.findFirst({
+        where: { orderItemId: item.id, ticket: { orderId: order.id } },
+        include: { ticket: true },
+      });
+      if (
+        !ticketItem ||
+        ticketItem.ticket.status === PreparationTicketStatus.READY ||
+        ticketItem.ticket.status === PreparationTicketStatus.CANCELLED
+      ) {
+        throw new ConflictException(
+          'La estación ya terminó o canceló la preparación de este ítem',
+        );
+      }
+      if (
+        item.cancellationStatus === 'PENDING' ||
+        item.status === OrderItemStatus.CANCELLED
+      ) {
+        throw new ConflictException(
+          'No se puede modificar un ítem con cancelación pendiente o aprobada',
+        );
+      }
+      return serializableTransaction(this.prisma, async (tx) => {
+        const currentOrder = await tx.order.findFirst({
+          where: {
+            id: order.id,
+            status: { in: [OrderStatus.SENT, OrderStatus.IN_PROGRESS] },
+          },
+        });
+        const currentItem = await tx.orderItem.findUnique({
+          where: { id: item.id },
+        });
+        const currentTicketItem = await tx.preparationTicketItem.findFirst({
+          where: {
+            orderItemId: item.id,
+            ticket: {
+              orderId: order.id,
+              status: {
+                notIn: [
+                  PreparationTicketStatus.READY,
+                  PreparationTicketStatus.CANCELLED,
+                ],
+              },
+            },
+          },
+        });
+        if (
+          !currentOrder ||
+          !currentItem ||
+          !currentTicketItem ||
+          currentItem.cancellationStatus === 'PENDING' ||
+          currentItem.status === OrderItemStatus.CANCELLED
+        ) {
+          throw new ConflictException(
+            'El ítem o su comanda cambiaron; actualiza y vuelve a intentar',
+          );
+        }
+        const changed = await tx.orderItem.updateMany({
+          where: { id: item.id, updatedAt: currentItem.updatedAt },
+          data: { notes: dto.notes!.trim() || null },
+        });
+        if (changed.count !== 1)
+          throw new ConflictException('El ítem cambió mientras se actualizaba');
+        const updated = await tx.orderItem.findUniqueOrThrow({
+          where: { id: item.id },
+          include: { modifiers: true, product: true },
+        });
+        await this.audit.record(tx, {
+          businessId: user.businessId,
+          locationId: order.locationId,
+          userId: user.userId,
+          action: 'ORDER_ITEM_UPDATED',
+          entityType: 'OrderItem',
+          entityId: item.id,
+          metadata: {
+            orderId: order.id,
+            field: 'notes',
+            before: currentItem.notes,
+            after: updated.notes,
+            source: 'POST_SEND_AMENDMENT_VISIBLE_TO_PREPARATION',
+          },
+        });
+        return updated;
+      });
     }
 
     const item = await this.prisma.orderItem.findFirst({
@@ -416,6 +553,9 @@ export class OrdersService {
     if (!item) {
       throw new NotFoundException('Item no encontrado en este pedido');
     }
+    if (item.status === OrderItemStatus.CANCELLED) {
+      throw new ConflictException('No se puede editar un ítem cancelado');
+    }
 
     if (!item.productId) {
       throw new ConflictException('Este item no corresponde a un producto');
@@ -425,24 +565,30 @@ export class OrdersService {
 
     // Si no enviamos modifierIds, mantenemos los actuales.
     if (modifierIds === undefined) {
-      return this.prisma.orderItem.update({
-        where: {
-          id: item.id,
-        },
-        data: {
-          ...(dto.quantity !== undefined && {
-            quantity: dto.quantity,
-          }),
-
-          ...(dto.notes !== undefined && {
-            notes: dto.notes.trim() || null,
-          }),
-        },
-
-        include: {
-          modifiers: true,
-          product: true,
-        },
+      return this.prisma.$transaction(async (tx) => {
+        const updated = await tx.orderItem.update({
+          where: { id: item.id },
+          data: {
+            ...(dto.quantity !== undefined && { quantity: dto.quantity }),
+            ...(dto.notes !== undefined && { notes: dto.notes.trim() || null }),
+          },
+          include: { modifiers: true, product: true },
+        });
+        await this.audit.record(tx, {
+          businessId: user.businessId,
+          locationId: order.locationId,
+          userId: user.userId,
+          action: 'ORDER_ITEM_UPDATED',
+          entityType: 'OrderItem',
+          entityId: item.id,
+          metadata: {
+            orderId: order.id,
+            source: 'DRAFT',
+            before: { quantity: item.quantity, notes: item.notes },
+            after: { quantity: updated.quantity, notes: updated.notes },
+          },
+        });
+        return updated;
       });
     }
 
@@ -474,7 +620,7 @@ export class OrdersService {
       });
 
       // Actualizamos el item y recreamos sus modifiers.
-      return tx.orderItem.update({
+      const updated = await tx.orderItem.update({
         where: {
           id: item.id,
         },
@@ -502,6 +648,25 @@ export class OrdersService {
           product: true,
         },
       });
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: order.locationId,
+        userId: user.userId,
+        action: 'ORDER_ITEM_UPDATED',
+        entityType: 'OrderItem',
+        entityId: item.id,
+        metadata: {
+          orderId: order.id,
+          source: 'DRAFT',
+          before: { quantity: item.quantity, notes: item.notes },
+          after: {
+            quantity: updated.quantity,
+            notes: updated.notes,
+            modifierIds,
+          },
+        },
+      });
+      return updated;
     });
   }
 
@@ -536,18 +701,129 @@ export class OrdersService {
       throw new NotFoundException('Item no encontrado en este pedido');
     }
 
-    return this.prisma.orderItem.update({
-      where: {
-        id: item.id,
-      },
-      data: {
-        status: OrderItemStatus.CANCELLED,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const cancelled = await tx.orderItem.update({
+        where: { id: item.id },
+        data: { status: OrderItemStatus.CANCELLED },
+        include: { modifiers: true, product: true },
+      });
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: order.locationId,
+        userId: user.userId,
+        action: 'ORDER_ITEM_CANCELLED',
+        entityType: 'OrderItem',
+        entityId: item.id,
+        metadata: {
+          orderId: order.id,
+          source: 'DRAFT',
+          quantity: item.quantity,
+        },
+      });
+      return cancelled;
+    });
+  }
 
-      include: {
-        modifiers: true,
-        product: true,
-      },
+  async requestItemCancellation(
+    user: JwtUser,
+    orderId: string,
+    itemId: string,
+    dto: RequestItemCancellationDto,
+  ) {
+    return serializableTransaction(this.prisma, async (tx) => {
+      const order = await tx.order.findFirst({
+        where: { id: orderId, location: { businessId: user.businessId } },
+      });
+      if (!order) throw new NotFoundException('Pedido no encontrado');
+      if (
+        order.status !== OrderStatus.SENT &&
+        order.status !== OrderStatus.IN_PROGRESS
+      ) {
+        throw new ConflictException(
+          'Solo se puede solicitar cancelación mientras la preparación sigue activa',
+        );
+      }
+      if (user.role === Role.WAITER && order.waiterId !== user.userId) {
+        throw new ForbiddenException(
+          'Solo el mesero asignado puede solicitar la cancelación',
+        );
+      }
+      if (
+        user.role !== Role.WAITER &&
+        user.role !== Role.OWNER &&
+        user.role !== Role.ADMIN &&
+        user.role !== Role.MANAGER
+      ) {
+        throw new ForbiddenException(
+          'Tu rol no puede solicitar la cancelación de ítems',
+        );
+      }
+      const item = await tx.orderItem.findFirst({
+        where: { id: itemId, orderId },
+      });
+      if (!item)
+        throw new NotFoundException('Ítem no encontrado en este pedido');
+      if (item.status === OrderItemStatus.CANCELLED)
+        throw new ConflictException('El ítem ya está cancelado');
+      if (item.cancellationStatus === 'PENDING')
+        throw new ConflictException(
+          'El ítem ya tiene una cancelación pendiente',
+        );
+      if (item.cancellationStatus === 'APPROVED')
+        throw new ConflictException('La cancelación ya fue aprobada');
+      const ticketItem = await tx.preparationTicketItem.findFirst({
+        where: { orderItemId: item.id, ticket: { orderId } },
+        include: { ticket: true },
+      });
+      if (
+        !ticketItem ||
+        ticketItem.ticket.status === PreparationTicketStatus.READY ||
+        ticketItem.ticket.status === PreparationTicketStatus.CANCELLED
+      ) {
+        throw new ConflictException(
+          'La estación ya terminó o canceló este ítem; no se puede solicitar su cancelación',
+        );
+      }
+      const requestedAt = new Date();
+      const changed = await tx.orderItem.updateMany({
+        where: {
+          id: item.id,
+          cancellationStatus: item.cancellationStatus,
+          status: item.status,
+        },
+        data: {
+          cancellationStatus: 'PENDING',
+          cancellationReason: dto.reason.trim(),
+          cancellationRequestedAt: requestedAt,
+          cancellationRequestedBy: user.userId,
+          cancellationResolvedAt: null,
+          cancellationResolvedBy: null,
+        },
+      });
+      if (changed.count !== 1)
+        throw new ConflictException(
+          'El ítem cambió mientras se solicitaba la cancelación',
+        );
+      const updated = await tx.orderItem.findUniqueOrThrow({
+        where: { id: item.id },
+        include: { modifiers: true },
+      });
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: order.locationId,
+        userId: user.userId,
+        action: 'ORDER_ITEM_UPDATED',
+        entityType: 'OrderItem',
+        entityId: item.id,
+        metadata: {
+          orderId,
+          event: 'CANCELLATION_REQUESTED',
+          reason: dto.reason.trim(),
+          quantity: item.quantity,
+          workstationId: ticketItem.ticket.workstationId,
+        },
+      });
+      return updated;
     });
   }
 
@@ -653,29 +929,37 @@ export class OrdersService {
     return this.prisma.$transaction(async (tx) => {
       const order = await tx.order.create({
         data: {
-        locationId: dto.locationId,
+          locationId: dto.locationId,
 
-        tableSessionId: dto.tableSessionId,
+          tableSessionId: dto.tableSessionId,
 
-        // Usuario que realmente creó la orden.
-        createdBy: user.userId,
+          // Usuario que realmente creó la orden.
+          createdBy: user.userId,
 
-        // Puede ser null para TAKEAWAY directo desde caja.
-        waiterId: dto.waiterId,
+          // Puede ser null para TAKEAWAY directo desde caja.
+          waiterId: dto.waiterId,
 
-        type: dto.type,
+          type: dto.type,
 
-        status: OrderStatus.DRAFT,
+          status: OrderStatus.DRAFT,
 
-        customerName: dto.customerName?.trim(),
+          customerName: dto.customerName?.trim(),
 
-        notes: dto.notes?.trim(),
+          notes: dto.notes?.trim(),
         },
       });
       await this.audit.record(tx, {
-        businessId: user.businessId, locationId: order.locationId, userId: user.userId,
-        action: 'ORDER_CREATED', entityType: 'Order', entityId: order.id,
-        metadata: { type: order.type, status: order.status, tableSessionId: order.tableSessionId },
+        businessId: user.businessId,
+        locationId: order.locationId,
+        userId: user.userId,
+        action: 'ORDER_CREATED',
+        entityType: 'Order',
+        entityId: order.id,
+        metadata: {
+          type: order.type,
+          status: order.status,
+          tableSessionId: order.tableSessionId,
+        },
       });
       return order;
     });
@@ -715,6 +999,26 @@ export class OrdersService {
         },
 
         items: true,
+        billOrders: {
+          include: {
+            bill: {
+              select: {
+                id: true,
+                status: true,
+                total: true,
+                payments: {
+                  select: {
+                    id: true,
+                    method: true,
+                    status: true,
+                    amount: true,
+                    cashHandover: { select: { id: true, status: true } },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
       orderBy: {
         createdAt: 'desc',
@@ -763,6 +1067,26 @@ export class OrdersService {
             modifiers: true,
           },
         },
+        billOrders: {
+          include: {
+            bill: {
+              select: {
+                id: true,
+                status: true,
+                total: true,
+                payments: {
+                  select: {
+                    id: true,
+                    method: true,
+                    status: true,
+                    amount: true,
+                    cashHandover: { select: { id: true, status: true } },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     });
 
@@ -777,79 +1101,178 @@ export class OrdersService {
    * Cambiar estado del pedido.
    */
   async updateStatus(user: JwtUser, id: string, dto: UpdateOrderStatusDto) {
-    const order = await this.prisma.order.findFirst({
-      where: {
-        id,
-
-        location: {
-          businessId: user.businessId,
-        },
-      },
-    });
-
-    if (!order) {
-      throw new NotFoundException('Pedido no encontrado');
+    if (
+      dto.status !== OrderStatus.SENT &&
+      dto.status !== OrderStatus.DELIVERED
+    ) {
+      throw new BadRequestException(
+        'El pedido solo puede enviarse a preparación o marcarse como entregado desde esta acción',
+      );
     }
 
-    this.validateStatusTransition(order.status, dto.status);
-
-    return this.prisma.$transaction(async (tx) => {
-      const updatedOrder = await tx.order.update({
-        where: {
-          id: order.id,
-        },
-
-        data: {
-          status: dto.status,
-        },
+    return serializableTransaction(this.prisma, async (tx) => {
+      const order = await tx.order.findFirst({
+        where: { id, location: { businessId: user.businessId } },
       });
+      if (!order) throw new NotFoundException('Pedido no encontrado');
 
-      const action = dto.status === OrderStatus.SENT ? 'ORDER_SENT'
-        : dto.status === OrderStatus.READY ? 'ORDER_READY'
-        : dto.status === OrderStatus.DELIVERED ? 'ORDER_DELIVERED'
-        : dto.status === OrderStatus.CLOSED ? 'ORDER_CLOSED'
-        : 'STATUS_CHANGE';
-      await this.audit.record(tx, {
-        businessId: user.businessId, locationId: order.locationId, userId: user.userId,
-        action, entityType: 'Order', entityId: order.id,
-        metadata: { from: order.status, to: dto.status },
+      const expectedStatus =
+        dto.status === OrderStatus.SENT ? OrderStatus.DRAFT : OrderStatus.READY;
+      if (order.status !== expectedStatus) {
+        throw new ConflictException(
+          dto.status === OrderStatus.DELIVERED
+            ? 'El pedido solo puede entregarse cuando preparación lo haya marcado como listo'
+            : `Solo se pueden enviar pedidos en estado ${OrderStatus.DRAFT}`,
+        );
+      }
+      if (user.role === Role.WAITER && order.waiterId !== user.userId) {
+        throw new ForbiddenException(
+          'Solo el mesero asignado puede operar este pedido',
+        );
+      }
+
+      if (dto.status === OrderStatus.DELIVERED) {
+        const activeItems = await tx.orderItem.count({
+          where: {
+            orderId: order.id,
+            status: { not: OrderItemStatus.CANCELLED },
+          },
+        });
+        if (activeItems === 0) {
+          throw new ConflictException(
+            'No se puede entregar un pedido sin ítems activos; cancela el pedido completo',
+          );
+        }
+        const tickets = await tx.preparationTicket.findMany({
+          where: { orderId: order.id },
+          select: {
+            status: true,
+            items: { select: { orderItem: { select: { status: true } } } },
+          },
+        });
+        if (
+          tickets.length === 0 ||
+          tickets.some(
+            (ticket) =>
+              ticket.status !== PreparationTicketStatus.READY &&
+              !(
+                ticket.status === PreparationTicketStatus.CANCELLED &&
+                ticket.items.every(
+                  ({ orderItem }) =>
+                    orderItem.status === OrderItemStatus.CANCELLED,
+                )
+              ),
+          )
+        ) {
+          throw new ConflictException(
+            'No se puede entregar un pedido con comandas pendientes',
+          );
+        }
+      }
+
+      const changed = await tx.order.updateMany({
+        where: { id: order.id, status: expectedStatus },
+        data: { status: dto.status },
       });
+      if (changed.count !== 1) {
+        throw new ConflictException(
+          'El estado del pedido cambió por otra solicitud',
+        );
+      }
 
       const preparationTickets =
-        order.status === OrderStatus.DRAFT && dto.status === OrderStatus.SENT
+        dto.status === OrderStatus.SENT
           ? await this.createPreparationTickets(tx, order.id)
           : [];
-
-      return {
-        order: updatedOrder,
-        preparationTickets,
-      };
+      const updatedOrder = await tx.order.findUniqueOrThrow({
+        where: { id: order.id },
+      });
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: order.locationId,
+        userId: user.userId,
+        action:
+          dto.status === OrderStatus.SENT ? 'ORDER_SENT' : 'ORDER_DELIVERED',
+        entityType: 'Order',
+        entityId: order.id,
+        metadata: { from: order.status, to: dto.status },
+      });
+      return { order: updatedOrder, preparationTickets };
     });
   }
   /**
    * Cancelar pedido.
    */
   async cancel(user: JwtUser, id: string) {
-    const order = await this.prisma.order.findFirst({
-      where: {
-        id,
-        location: {
-          businessId: user.businessId,
+    return serializableTransaction(this.prisma, async (tx) => {
+      const order = await tx.order.findFirst({
+        where: { id, location: { businessId: user.businessId } },
+      });
+      if (!order) throw new NotFoundException('Pedido no encontrado');
+      this.validateStatusTransition(order.status, OrderStatus.CANCELLED);
+      if (user.role === Role.WAITER && order.waiterId !== user.userId) {
+        throw new ForbiddenException(
+          'Solo el mesero asignado puede operar este pedido',
+        );
+      }
+      const changed = await tx.order.updateMany({
+        where: { id: order.id, status: order.status },
+        data: { status: OrderStatus.CANCELLED },
+      });
+      if (changed.count !== 1) {
+        throw new ConflictException(
+          'El estado del pedido cambió por otra solicitud',
+        );
+      }
+      const activeTickets = await tx.preparationTicket.findMany({
+        where: {
+          orderId: order.id,
+          status: {
+            in: [
+              PreparationTicketStatus.PENDING,
+              PreparationTicketStatus.ACCEPTED,
+              PreparationTicketStatus.IN_PROGRESS,
+            ],
+          },
         },
-      },
-    });
-
-    if (!order) {
-      throw new NotFoundException('Pedido no encontrado');
-    }
-
-    this.validateStatusTransition(order.status, OrderStatus.CANCELLED);
-
-    return this.prisma.$transaction(async (tx) => {
-      const cancelled = await tx.order.update({ where: { id }, data: { status: OrderStatus.CANCELLED } });
+        select: { id: true, status: true },
+      });
+      if (activeTickets.length > 0) {
+        const cancelledAt = new Date();
+        await tx.preparationTicket.updateMany({
+          where: {
+            id: { in: activeTickets.map(({ id }) => id) },
+            status: { in: activeTickets.map(({ status }) => status) },
+          },
+          data: { status: PreparationTicketStatus.CANCELLED, cancelledAt },
+        });
+        for (const ticket of activeTickets) {
+          await this.audit.record(tx, {
+            businessId: user.businessId,
+            locationId: order.locationId,
+            userId: user.userId,
+            action: 'PREPARATION_TICKET_CANCELLED',
+            entityType: 'PreparationTicket',
+            entityId: ticket.id,
+            metadata: {
+              orderId: order.id,
+              from: ticket.status,
+              to: PreparationTicketStatus.CANCELLED,
+              source: 'ORDER_CANCELLED',
+            },
+          });
+        }
+      }
+      const cancelled = await tx.order.findUniqueOrThrow({
+        where: { id: order.id },
+      });
       await this.audit.record(tx, {
-        businessId: user.businessId, locationId: order.locationId, userId: user.userId,
-        action: 'ORDER_CANCELLED', entityType: 'Order', entityId: order.id,
+        businessId: user.businessId,
+        locationId: order.locationId,
+        userId: user.userId,
+        action: 'ORDER_CANCELLED',
+        entityType: 'Order',
+        entityId: order.id,
         metadata: { from: order.status, to: OrderStatus.CANCELLED },
       });
       return cancelled;

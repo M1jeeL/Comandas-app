@@ -13,14 +13,14 @@ import { DiscountsService } from './discounts.service.js';
 
 import { CreateDiscountDto } from './dto/create-discount.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 @Controller('bills/:billId/discounts')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class DiscountsController {
   constructor(private readonly discountsService: DiscountsService) {}
 

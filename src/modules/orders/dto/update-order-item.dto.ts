@@ -6,6 +6,7 @@ import {
   IsString,
   IsUUID,
   Min,
+  MaxLength,
 } from 'class-validator';
 
 export class UpdateOrderItemDto {
@@ -15,6 +16,7 @@ export class UpdateOrderItemDto {
   quantity?: number;
 
   @IsString()
+  @MaxLength(500)
   @IsOptional()
   notes?: string;
 

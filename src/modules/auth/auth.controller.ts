@@ -5,6 +5,7 @@ import {
   Post,
   Req,
   Res,
+  UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 
@@ -16,6 +17,7 @@ import { LoginDto } from './dto/login.dto.js';
 
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { TrustedOriginGuard } from './guards/trusted-origin.guard.js';
+import { AuthRateLimitGuard } from './guards/auth-rate-limit.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
@@ -31,12 +33,13 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('register')
+  @UseGuards(TrustedOriginGuard, AuthRateLimitGuard)
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
   }
 
   @Post('login')
-  @UseGuards(TrustedOriginGuard)
+  @UseGuards(TrustedOriginGuard, AuthRateLimitGuard)
   async login(
     @Body() dto: LoginDto,
     @Res({ passthrough: true }) res: Response,
@@ -52,7 +55,7 @@ export class AuthController {
   }
 
   @Post('refresh')
-  @UseGuards(TrustedOriginGuard)
+  @UseGuards(TrustedOriginGuard, AuthRateLimitGuard)
   async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
@@ -60,7 +63,7 @@ export class AuthController {
     const token = req.cookies?.[REFRESH_COOKIE];
 
     if (typeof token !== 'string') {
-      throw new Error('Refresh token no encontrado');
+      throw new UnauthorizedException('La sesión expiró. Inicia sesión nuevamente.');
     }
 
     const result = await this.authService.refresh(token);

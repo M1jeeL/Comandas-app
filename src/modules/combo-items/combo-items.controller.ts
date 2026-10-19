@@ -15,14 +15,14 @@ import { ComboItemsService } from './combo-items.service.js';
 import { CreateComboItemDto } from './dto/create-combo-item.dto.js';
 import { UpdateComboItemDto } from './dto/update-combo-item.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 @Controller('combos/:comboId/items')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class ComboItemsController {
   constructor(private readonly comboItemsService: ComboItemsService) {}
 

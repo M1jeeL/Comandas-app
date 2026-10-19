@@ -14,12 +14,12 @@ import {
 import { ProductsService } from './products.service.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 @Controller('products')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 

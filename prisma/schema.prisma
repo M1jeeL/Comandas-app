@@ -1,4 +1,4 @@
-  // This is your Prisma schema file,
+// This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 // Get a free hosted Postgres database in seconds: `npx create-db`
@@ -87,6 +87,12 @@ enum TableStatus {
   INACTIVE
 }
 
+enum TableOperationalStatus {
+  AVAILABLE
+  RESERVED
+  OUT_OF_SERVICE
+}
+
 enum ModifierGroupStatus {
   ACTIVE
   INACTIVE
@@ -123,6 +129,13 @@ enum OrderItemStatus {
   CANCELLED
 }
 
+enum ItemCancellationStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum PreparationTicketStatus {
   PENDING
   ACCEPTED
@@ -155,6 +168,7 @@ enum PaymentStatus {
   CONFIRMED
   REJECTED
   CANCELLED
+  REVERSED
 }
 
 enum CashSessionStatus {
@@ -165,6 +179,7 @@ enum CashSessionStatus {
 enum CashMovementType {
   SALE
   HANDOVER
+  REFUND
   WITHDRAWAL
   DEPOSIT
   ADJUSTMENT
@@ -174,6 +189,7 @@ enum CashHandoverStatus {
   PENDING
   CONFIRMED
   REJECTED
+  CANCELLED
 }
 
 enum AuditAction {
@@ -234,6 +250,7 @@ enum AuditAction {
   PAYMENT_REJECTED
   PAYMENT_CANCELLED
   PAYMENT_REFUNDED
+  PAYMENT_REVERSED
 
   // ============================================================
   // CASH
@@ -323,6 +340,7 @@ enum AuditAction {
 
   CONFIGURATION_UPDATED
 }
+
 // ============================================================
 // TENANCY
 // ============================================================
@@ -387,18 +405,21 @@ model User {
 
   memberships Membership[]
 
-  ordersCreated         Order[]        @relation("OrderCreatedBy")
-  waiterOrders          Order[]        @relation("OrderWaiter")
-  tableSessions         TableSession[] @relation("TableSessionWaiter")
-  appliedDiscounts      Discount[]     @relation("DiscountAppliedBy")
-  cashHandovers         CashHandover[] @relation("CashHandoverWaiter")
-  receivedCashHandovers CashHandover[] @relation("CashHandoverReceiver")
-  cashSessionsOpened    CashSession[]  @relation("CashSessionOpenedBy")
-  cashSessionsClosed    CashSession[]  @relation("CashSessionClosedBy")
-  cashMovements         CashMovement[]
-  cashHandoversCreated  CashHandover[] @relation("CashHandoverCreatedBy")
-  auditLogs             AuditLog[]
-  refreshSessions       RefreshSession[]
+  ordersCreated              Order[]          @relation("OrderCreatedBy")
+  waiterOrders               Order[]          @relation("OrderWaiter")
+  tableSessions              TableSession[]   @relation("TableSessionWaiter")
+  appliedDiscounts           Discount[]       @relation("DiscountAppliedBy")
+  cashHandovers              CashHandover[]   @relation("CashHandoverWaiter")
+  receivedCashHandovers      CashHandover[]   @relation("CashHandoverReceiver")
+  cashSessionsOpened         CashSession[]    @relation("CashSessionOpenedBy")
+  cashSessionsClosed         CashSession[]    @relation("CashSessionClosedBy")
+  cashMovements              CashMovement[]
+  cashHandoversCreated       CashHandover[]   @relation("CashHandoverCreatedBy")
+  paymentReversals           Payment[]        @relation("PaymentReversedBy")
+  itemCancellationsRequested OrderItem[]      @relation("OrderItemCancellationRequestedBy")
+  itemCancellationsResolved  OrderItem[]      @relation("OrderItemCancellationResolvedBy")
+  auditLogs                  AuditLog[]
+  refreshSessions            RefreshSession[]
 
   @@index([email])
 }
@@ -413,9 +434,9 @@ model Membership {
   createdAt  DateTime         @default(now())
   updatedAt  DateTime         @updatedAt
 
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  business        Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  location        Location         @relation(fields: [locationId], references: [id], onDelete: Restrict)
   refreshSessions RefreshSession[]
 
   @@unique([userId, businessId])
@@ -542,6 +563,7 @@ model ProductWorkstation {
   workstation Workstation @relation(fields: [workstationId], references: [id], onDelete: Cascade)
 
   @@unique([productId, workstationId])
+  @@unique([productId])
   @@index([workstationId])
 }
 
@@ -620,6 +642,7 @@ model RestaurantTable {
   name       String
   capacity   Int?
   status     TableStatus @default(ACTIVE)
+  operationalStatus TableOperationalStatus @default(AVAILABLE)
   createdAt  DateTime    @default(now())
   updatedAt  DateTime    @updatedAt
 
@@ -683,19 +706,27 @@ model Order {
 }
 
 model OrderItem {
-  id                  String          @id @default(uuid())
-  orderId             String
-  productId           String
-  productNameSnapshot String
-  unitPrice           Decimal         @db.Decimal(12, 2)
-  quantity            Int
-  notes               String?
-  status              OrderItemStatus @default(PENDING)
-  createdAt           DateTime        @default(now())
-  updatedAt           DateTime        @updatedAt
+  id                      String                 @id @default(uuid())
+  orderId                 String
+  productId               String
+  productNameSnapshot     String
+  unitPrice               Decimal                @db.Decimal(12, 2)
+  quantity                Int
+  notes                   String?
+  status                  OrderItemStatus        @default(PENDING)
+  cancellationStatus      ItemCancellationStatus @default(NONE)
+  cancellationReason      String?
+  cancellationRequestedAt DateTime?
+  cancellationRequestedBy String?
+  cancellationResolvedAt  DateTime?
+  cancellationResolvedBy  String?
+  createdAt               DateTime               @default(now())
+  updatedAt               DateTime               @updatedAt
 
-  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  order                 Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product               Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  cancellationRequester User?   @relation("OrderItemCancellationRequestedBy", fields: [cancellationRequestedBy], references: [id], onDelete: Restrict)
+  cancellationResolver  User?   @relation("OrderItemCancellationResolvedBy", fields: [cancellationResolvedBy], references: [id], onDelete: Restrict)
 
   modifiers   OrderItemModifier[]
   ticketItems PreparationTicketItem[]
@@ -782,6 +813,7 @@ model BillOrder {
   order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
 
   @@id([billId, orderId])
+  @@unique([orderId])
   @@index([orderId])
 }
 
@@ -803,21 +835,27 @@ model Discount {
 }
 
 model Payment {
-  id           String        @id @default(uuid())
-  billId       String
-  method       PaymentMethod
-  status       PaymentStatus @default(PENDING)
-  amount       Decimal       @db.Decimal(12, 2)
-  reference    String?
-  confirmedAt  DateTime?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  cashHandover CashHandover?
+  id             String        @id @default(uuid())
+  billId         String
+  method         PaymentMethod
+  status         PaymentStatus @default(PENDING)
+  amount         Decimal       @db.Decimal(12, 2)
+  reference      String?
+  idempotencyKey String?       @unique
+  confirmedAt    DateTime?
+  reversedAt     DateTime?
+  reversedBy     String?
+  reversalReason String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  cashHandover   CashHandover?
 
-  bill Bill @relation(fields: [billId], references: [id], onDelete: Restrict)
+  bill           Bill  @relation(fields: [billId], references: [id], onDelete: Restrict)
+  reversedByUser User? @relation("PaymentReversedBy", fields: [reversedBy], references: [id], onDelete: Restrict)
 
   @@index([billId, status])
   @@index([method, status])
+  @@index([status, reversedAt])
   @@index([createdAt])
 }
 
@@ -850,14 +888,15 @@ model CashSession {
 }
 
 model CashMovement {
-  id            String           @id @default(uuid())
-  cashSessionId String
-  type          CashMovementType
-  amount        Decimal          @db.Decimal(12, 2)
-  reason        String?
-  reference     String?
-  createdBy     String
-  createdAt     DateTime         @default(now())
+  id             String           @id @default(uuid())
+  cashSessionId  String
+  type           CashMovementType
+  amount         Decimal          @db.Decimal(12, 2)
+  idempotencyKey String?          @unique
+  reason         String?
+  reference      String?
+  createdBy      String
+  createdAt      DateTime         @default(now())
 
   cashSession CashSession @relation(fields: [cashSessionId], references: [id], onDelete: Cascade)
   user        User        @relation(fields: [createdBy], references: [id], onDelete: Restrict)
@@ -917,8 +956,6 @@ model AuditLog {
   @@index([userId, createdAt])
 }
 
-
-
 model RefreshSession {
   id           String    @id @default(uuid())
   familyId     String    @default(uuid())
@@ -930,9 +967,9 @@ model RefreshSession {
   replacedAt   DateTime?
   createdAt    DateTime  @default(now())
 
-  user User @relation(fields: [userId],references: [id],onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  membership Membership @relation(fields: [membershipId],references: [id],onDelete: Cascade)
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([familyId])

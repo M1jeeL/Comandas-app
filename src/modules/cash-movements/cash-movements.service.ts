@@ -18,6 +18,7 @@ import {
 
 import { Prisma } from '../../generated/prisma/client.js';
 import { AuditService } from '../audit/audit.service.js';
+import { serializableTransaction } from '../../common/database/serializable-transaction.js';
 
 @Injectable()
 export class CashMovementsService {
@@ -53,7 +54,8 @@ export class CashMovementsService {
     cashSessionId: string,
     dto: CreateCashMovementDto,
   ) {
-    return this.prisma.$transaction(async (tx) => {
+    try {
+      return await serializableTransaction(this.prisma, async (tx) => {
       const session = await tx.cashSession.findFirst({
         where: {
           id: cashSessionId,
@@ -68,6 +70,22 @@ export class CashMovementsService {
         throw new NotFoundException('Sesión de caja no encontrada');
       }
 
+      const existing = await tx.cashMovement.findUnique({
+        where: { idempotencyKey: dto.idempotencyKey },
+      });
+      if (existing) {
+        if (
+          existing.cashSessionId !== session.id ||
+          existing.type !== dto.type ||
+          !existing.amount.equals(dto.amount) ||
+          existing.reason !== (dto.reason?.trim() || null) ||
+          existing.reference !== (dto.reference?.trim() || null)
+        ) {
+          throw new ConflictException('La clave de reintento ya se usó para otro movimiento');
+        }
+        return existing;
+      }
+
       /**
        * Nunca permitimos movimientos sobre
        * una sesión cerrada.
@@ -76,6 +94,14 @@ export class CashMovementsService {
         throw new ConflictException(
           'No se pueden registrar movimientos en una sesión de caja cerrada',
         );
+      }
+
+      const sessionLock = await tx.cashSession.updateMany({
+        where: { id: session.id, status: CashSessionStatus.OPEN },
+        data: { status: CashSessionStatus.OPEN },
+      });
+      if (sessionLock.count !== 1) {
+        throw new ConflictException('La sesión de caja dejó de estar abierta');
       }
 
       /**
@@ -87,10 +113,11 @@ export class CashMovementsService {
        */
       if (
         dto.type === CashMovementType.SALE ||
-        dto.type === CashMovementType.HANDOVER
+        dto.type === CashMovementType.HANDOVER ||
+        dto.type === CashMovementType.REFUND
       ) {
         throw new BadRequestException(
-          'Los movimientos SALE y HANDOVER son generados por sus respectivos flujos',
+          'Los movimientos SALE, HANDOVER y REFUND son generados por sus respectivos flujos',
         );
       }
 
@@ -118,6 +145,7 @@ export class CashMovementsService {
           type: dto.type,
 
           amount,
+          idempotencyKey: dto.idempotencyKey,
 
           reason: dto.reason?.trim() || null,
 
@@ -135,7 +163,24 @@ export class CashMovementsService {
       });
 
       return movement;
-    });
+      });
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code !== 'P2002') throw error;
+      const existing = await this.prisma.cashMovement.findUnique({
+        where: { idempotencyKey: dto.idempotencyKey },
+      });
+      if (!existing) throw error;
+      if (
+        existing.cashSessionId !== cashSessionId ||
+        existing.type !== dto.type ||
+        !existing.amount.equals(dto.amount) ||
+        existing.reason !== (dto.reason?.trim() || null) ||
+        existing.reference !== (dto.reference?.trim() || null)
+      ) {
+        throw new ConflictException('La clave de reintento ya se usó para otro movimiento');
+      }
+      return existing;
+    }
   }
 
   /**

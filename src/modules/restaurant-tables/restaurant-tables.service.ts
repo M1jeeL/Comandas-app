@@ -11,10 +11,31 @@ import { CreateRestaurantTableDto } from './dto/create-restaurant-table.dto.js';
 import { UpdateRestaurantTableDto } from './dto/update-restaurant-table.dto.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
+import { Role, TableOperationalStatus } from '../../generated/prisma/enums.js';
+import { AuditService } from '../audit/audit.service.js';
+import { serializableTransaction } from '../../common/database/serializable-transaction.js';
+import { UpdateTableOperationalStatusDto } from './dto/update-table-operational-status.dto.js';
 
 @Injectable()
 export class RestaurantTablesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
+
+  private present<
+    T extends {
+      operationalStatus: TableOperationalStatus;
+      sessions: unknown[];
+    },
+  >(table: T) {
+    const occupied = table.sessions?.length > 0;
+    const { sessions: _sessions, ...data } = table;
+    return {
+      ...data,
+      operationalStatus: occupied ? 'OCCUPIED' : table.operationalStatus,
+    };
+  }
 
   /**
    * Verifica que la Location pertenezca al Business
@@ -76,7 +97,7 @@ export class RestaurantTablesService {
   async findAll(user: JwtUser, locationId: string) {
     await this.validateLocationOwnership(locationId, user.businessId);
 
-    return this.prisma.restaurantTable.findMany({
+    const tables = await this.prisma.restaurantTable.findMany({
       where: {
         locationId,
         status: 'ACTIVE',
@@ -84,7 +105,15 @@ export class RestaurantTablesService {
       orderBy: {
         name: 'asc',
       },
+      include: {
+        sessions: {
+          where: { status: { in: ['OPEN', 'CLOSING'] } },
+          select: { id: true },
+          take: 1,
+        },
+      },
     });
+    return tables.map((table) => this.present(table));
   }
 
   /**
@@ -98,13 +127,20 @@ export class RestaurantTablesService {
           businessId: user.businessId,
         },
       },
+      include: {
+        sessions: {
+          where: { status: { in: ['OPEN', 'CLOSING'] } },
+          select: { id: true },
+          take: 1,
+        },
+      },
     });
 
     if (!table) {
       throw new NotFoundException('Mesa no encontrada');
     }
 
-    return table;
+    return this.present(table);
   }
 
   /**
@@ -122,6 +158,16 @@ export class RestaurantTablesService {
 
     if (!existingTable) {
       throw new NotFoundException('Mesa no encontrada');
+    }
+
+    if (dto.locationId && dto.locationId !== existingTable.locationId) {
+      const openSession = await this.prisma.tableSession.findFirst({
+        where: { tableId: id, status: { in: ['OPEN', 'CLOSING'] } },
+      });
+      if (openSession)
+        throw new ConflictException(
+          'No se puede mover una mesa con una sesión activa',
+        );
     }
 
     // Si se intenta mover la mesa a otra ubicación,
@@ -172,6 +218,65 @@ export class RestaurantTablesService {
     });
   }
 
+  async updateOperationalStatus(
+    user: JwtUser,
+    id: string,
+    dto: UpdateTableOperationalStatusDto,
+  ) {
+    if (
+      !([Role.OWNER, Role.ADMIN, Role.MANAGER] as Role[]).includes(user.role)
+    ) {
+      throw new ForbiddenException(
+        'Solo administración puede cambiar la disponibilidad de una mesa',
+      );
+    }
+    const table = await this.prisma.restaurantTable.findFirst({
+      where: {
+        id,
+        status: 'ACTIVE',
+        location: { businessId: user.businessId },
+      },
+      select: { id: true, locationId: true, operationalStatus: true },
+    });
+    if (!table) throw new NotFoundException('Mesa activa no encontrada');
+    return serializableTransaction(this.prisma, async (tx) => {
+      const activeSession = await tx.tableSession.findFirst({
+        where: { tableId: id, status: { in: ['OPEN', 'CLOSING'] } },
+        select: { id: true },
+      });
+      if (activeSession)
+        throw new ConflictException(
+          'Cierra la atención antes de cambiar la disponibilidad de la mesa',
+        );
+      const changed = await tx.restaurantTable.updateMany({
+        where: {
+          id,
+          status: 'ACTIVE',
+          operationalStatus: table.operationalStatus,
+        },
+        data: { operationalStatus: dto.operationalStatus },
+      });
+      if (changed.count !== 1)
+        throw new ConflictException(
+          'La mesa cambió durante la actualización; actualiza la vista',
+        );
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: table.locationId,
+        userId: user.userId,
+        action: 'STATUS_CHANGE',
+        entityType: 'RestaurantTable',
+        entityId: id,
+        metadata: {
+          event: 'OPERATIONAL_STATUS_CHANGED',
+          from: table.operationalStatus,
+          to: dto.operationalStatus,
+        },
+      });
+      return tx.restaurantTable.findUniqueOrThrow({ where: { id } });
+    });
+  }
+
   /**
    * Eliminación lógica.
    */
@@ -189,13 +294,19 @@ export class RestaurantTablesService {
       throw new NotFoundException('Mesa no encontrada');
     }
 
-    return this.prisma.restaurantTable.update({
-      where: {
-        id,
-      },
-      data: {
-        status: 'INACTIVE',
-      },
+    return serializableTransaction(this.prisma, async (tx) => {
+      const activeSession = await tx.tableSession.findFirst({
+        where: { tableId: id, status: { in: ['OPEN', 'CLOSING'] } },
+        select: { id: true },
+      });
+      if (activeSession)
+        throw new ConflictException(
+          'No puedes desactivar una mesa con una sesión activa',
+        );
+      return tx.restaurantTable.update({
+        where: { id },
+        data: { status: 'INACTIVE' },
+      });
     });
   }
 }

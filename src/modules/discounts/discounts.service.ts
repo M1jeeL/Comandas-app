@@ -16,6 +16,7 @@ import { BillStatus, DiscountType } from '../../generated/prisma/enums.js';
 
 import { Prisma } from '../../generated/prisma/client.js';
 import { AuditService } from '../audit/audit.service.js';
+import { serializableTransaction } from '../../common/database/serializable-transaction.js';
 
 @Injectable()
 export class DiscountsService {
@@ -130,7 +131,7 @@ export class DiscountsService {
    * Crear descuento.
    */
   async create(user: JwtUser, billId: string, dto: CreateDiscountDto) {
-    return this.prisma.$transaction(async (tx) => {
+    return serializableTransaction(this.prisma, async (tx) => {
       const bill = await tx.bill.findFirst({
         where: {
           id: billId,
@@ -285,7 +286,7 @@ export class DiscountsService {
    * Esto recalcula nuevamente la cuenta.
    */
   async remove(user: JwtUser, billId: string, discountId: string) {
-    return this.prisma.$transaction(async (tx) => {
+    return serializableTransaction(this.prisma, async (tx) => {
       const bill = await tx.bill.findFirst({
         where: {
           id: billId,

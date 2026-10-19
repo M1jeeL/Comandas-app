@@ -16,14 +16,14 @@ import { ModifiersService } from './modifiers.service.js';
 import { CreateModifierDto } from './dto/create-modifier.dto.js';
 import { UpdateModifierDto } from './dto/update-modifier.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 @Controller('modifiers')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class ModifiersController {
   constructor(private readonly modifiersService: ModifiersService) {}
 
@@ -41,8 +41,11 @@ export class ModifiersController {
 
     @Query('groupId', new ParseUUIDPipe({ optional: true }))
     groupId?: string,
+
+    @Query('locationId', new ParseUUIDPipe({ optional: true }))
+    locationId?: string,
   ) {
-    return this.modifiersService.findAll(user, productId, groupId);
+    return this.modifiersService.findAll(user, productId, groupId, locationId);
   }
 
   @Get(':id')

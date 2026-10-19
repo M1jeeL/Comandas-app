@@ -16,14 +16,14 @@ import { ModifierGroupsService } from './modifier-groups.service.js';
 import { CreateModifierGroupDto } from './dto/create-modifier-group.dto.js';
 import { UpdateModifierGroupDto } from './dto/update-modifier-group.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 @Controller('modifier-groups')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class ModifierGroupsController {
   constructor(private readonly modifierGroupsService: ModifierGroupsService) {}
 

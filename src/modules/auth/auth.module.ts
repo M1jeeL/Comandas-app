@@ -6,6 +6,7 @@ import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { JwtStrategy } from './strategies/jwt.strategy.js';
 import { TrustedOriginGuard } from './guards/trusted-origin.guard.js';
+import { AuthRateLimitGuard } from './guards/auth-rate-limit.guard.js';
 
 @Module({
   imports: [
@@ -22,6 +23,6 @@ import { TrustedOriginGuard } from './guards/trusted-origin.guard.js';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, TrustedOriginGuard],
+  providers: [AuthService, JwtStrategy, TrustedOriginGuard, AuthRateLimitGuard],
 })
 export class AuthModule {}

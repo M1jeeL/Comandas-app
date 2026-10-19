@@ -15,14 +15,14 @@ import { BillsService } from './bills.service.js';
 import { CreateBillDto } from './dto/create-bill.dto.js';
 import { UpdateBillTipDto } from './dto/update-bill-tip.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 @Controller('bills')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class BillsController {
   constructor(private readonly billsService: BillsService) {}
 

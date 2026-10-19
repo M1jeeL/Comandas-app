@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -15,14 +16,18 @@ import { UpdatePaymentStatusDto } from './dto/update-payment-status.dto.js';
 import {
   BillStatus,
   CashHandoverStatus,
+  CashMovementType,
   CashSessionStatus,
   PaymentMethod,
   PaymentStatus,
   OrderStatus,
+  Role,
 } from '../../generated/prisma/enums.js';
 
 import { Prisma } from '../../generated/prisma/client.js';
 import { AuditService } from '../audit/audit.service.js';
+import { serializableTransaction } from '../../common/database/serializable-transaction.js';
+import { ReversePaymentDto } from './dto/reverse-payment.dto.js';
 
 @Injectable()
 export class PaymentsService {
@@ -30,6 +35,30 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
   ) {}
+
+  /** A waiter can handle a bill only when every order belongs to them. */
+  private async assertWaiterOwnsBill(
+    client: Pick<Prisma.TransactionClient, 'billOrder'>,
+    user: JwtUser,
+    billId: string,
+  ) {
+    if (user.role !== Role.WAITER) return;
+
+    const billOrders = await client.billOrder.findMany({
+      where: { billId },
+      select: { order: { select: { waiterId: true } } },
+    });
+
+    if (
+      billOrders.length === 0 ||
+      billOrders.some(({ order }) => order.waiterId !== user.userId)
+    ) {
+      throw new ConflictException(
+        'Solo puedes cobrar cuentas de pedidos asignados a tu usuario',
+      );
+    }
+  }
+
   private async findCashResponsibleWaiter(
     tx: Prisma.TransactionClient,
     billId: string,
@@ -112,6 +141,8 @@ export class PaymentsService {
       throw new NotFoundException('Cuenta no encontrada');
     }
 
+    await this.assertWaiterOwnsBill(this.prisma, user, bill.id);
+
     return bill;
   }
 
@@ -136,7 +167,8 @@ export class PaymentsService {
    * Crea un Payment en estado PENDING.
    */
   async create(user: JwtUser, billId: string, dto: CreatePaymentDto) {
-    return this.prisma.$transaction(async (tx) => {
+    try {
+      return await serializableTransaction(this.prisma, async (tx) => {
       const bill = await tx.bill.findFirst({
         where: {
           id: billId,
@@ -153,6 +185,22 @@ export class PaymentsService {
 
       if (!bill) {
         throw new NotFoundException('Cuenta no encontrada');
+      }
+
+      await this.assertWaiterOwnsBill(tx, user, bill.id);
+
+      const existing = await tx.payment.findUnique({
+        where: { idempotencyKey: dto.idempotencyKey },
+      });
+      if (existing) {
+        if (
+          existing.billId !== bill.id ||
+          existing.method !== dto.method ||
+          !existing.amount.equals(dto.amount)
+        ) {
+          throw new ConflictException('La clave de reintento ya se usó para otro pago');
+        }
+        return { payment: existing, bill: { id: bill.id, total: bill.total } };
       }
 
       if (bill.status === BillStatus.VOID) {
@@ -200,6 +248,7 @@ export class PaymentsService {
           amount,
 
           reference: dto.reference,
+          idempotencyKey: dto.idempotencyKey,
         },
       });
 
@@ -228,7 +277,25 @@ export class PaymentsService {
           remaining,
         },
       };
-    });
+      });
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code !== 'P2002') throw error;
+      const existing = await this.prisma.payment.findUnique({
+        where: { idempotencyKey: dto.idempotencyKey },
+      });
+      if (!existing) throw error;
+      const bill = await this.findBillForUser(user, billId);
+      if (
+        existing.billId !== bill.id ||
+        existing.method !== dto.method ||
+        !existing.amount.equals(dto.amount)
+      ) {
+        throw new ConflictException(
+          'La clave de reintento ya se usó para otro pago',
+        );
+      }
+      return { payment: existing, bill: { id: bill.id, total: bill.total } };
+    }
   }
 
   /**
@@ -257,7 +324,7 @@ export class PaymentsService {
     paymentId: string,
     dto: UpdatePaymentStatusDto,
   ) {
-    return this.prisma.$transaction(async (tx) => {
+    return serializableTransaction(this.prisma, async (tx) => {
       const bill = await tx.bill.findFirst({
         where: {
           id: billId,
@@ -274,6 +341,14 @@ export class PaymentsService {
 
       if (!bill) {
         throw new NotFoundException('Cuenta no encontrada');
+      }
+
+      await this.assertWaiterOwnsBill(tx, user, bill.id);
+
+      if (user.role === Role.WAITER && dto.status === PaymentStatus.REJECTED) {
+        throw new BadRequestException(
+          'El mesero puede confirmar o cancelar el pago, pero no rechazarlo',
+        );
       }
 
       if (bill.status === BillStatus.VOID) {
@@ -300,6 +375,9 @@ export class PaymentsService {
         payment.status === PaymentStatus.REJECTED ||
         payment.status === PaymentStatus.CANCELLED
       ) {
+        if (payment.status === dto.status) {
+          return { payment, bill };
+        }
         throw new ConflictException(
           `El pago ya se encuentra en estado ${payment.status} y no puede modificarse`,
         );
@@ -338,16 +416,18 @@ export class PaymentsService {
 
         const confirmedAt = new Date();
 
-        const updatedPayment = await tx.payment.update({
-          where: {
-            id: payment.id,
-          },
-
+        const claimed = await tx.payment.updateMany({
+          where: { id: payment.id, billId: bill.id, status: PaymentStatus.PENDING },
           data: {
             status: PaymentStatus.CONFIRMED,
-
             confirmedAt,
           },
+        });
+        if (claimed.count !== 1) {
+          throw new ConflictException('El pago ya fue procesado por otra solicitud');
+        }
+        const updatedPayment = await tx.payment.findUniqueOrThrow({
+          where: { id: payment.id },
         });
 
         await this.audit.record(tx, {
@@ -402,25 +482,55 @@ export class PaymentsService {
             tx,
             bill.locationId,
           );
+          const sessionLock = await tx.cashSession.updateMany({
+            where: { id: cashSession.id, status: CashSessionStatus.OPEN },
+            data: { status: CashSessionStatus.OPEN },
+          });
+          if (sessionLock.count !== 1) {
+            throw new ConflictException('La sesión de caja dejó de estar abierta');
+          }
 
           const waiterId = await this.findCashResponsibleWaiter(tx, bill.id);
 
           if (!waiterId) {
-            throw new ConflictException(
-              'No se puede generar la entrega de efectivo porque la cuenta no tiene un mesero responsable',
-            );
+            // Pedidos para llevar o cobrados directamente por caja no tienen
+            // entrega entre mesero y cajero: el pago confirmado entra a caja.
+            const movement = await tx.cashMovement.create({
+              data: {
+                cashSessionId: cashSession.id,
+                type: CashMovementType.SALE,
+                amount: payment.amount,
+                reference: payment.id,
+                createdBy: user.userId,
+              },
+            });
+            await this.audit.record(tx, {
+              businessId: user.businessId,
+              locationId: bill.locationId,
+              userId: user.userId,
+              action: 'CASH_MOVEMENT_CREATED',
+              entityType: 'CashMovement',
+              entityId: movement.id,
+              metadata: {
+                type: movement.type,
+                amount: movement.amount.toString(),
+                reference: payment.id,
+                paymentId: payment.id,
+                source: 'DIRECT_CASH_PAYMENT',
+              },
+            });
+          } else {
+            await tx.cashHandover.create({
+              data: {
+                cashSessionId: cashSession.id,
+                paymentId: payment.id,
+                waiterId,
+                createdBy: user.userId,
+                amount: payment.amount,
+                status: CashHandoverStatus.PENDING,
+              },
+            });
           }
-
-          await tx.cashHandover.create({
-            data: {
-              cashSessionId: cashSession.id,
-              paymentId: payment.id,
-              waiterId,
-              createdBy: user.userId,
-              amount: payment.amount,
-              status: CashHandoverStatus.PENDING,
-            },
-          });
         }
 
         return {
@@ -434,16 +544,18 @@ export class PaymentsService {
       // REJECTED / CANCELLED
       // -------------------------------------------
 
-      const updatedPayment = await tx.payment.update({
-        where: {
-          id: payment.id,
-        },
-
+      const claimed = await tx.payment.updateMany({
+        where: { id: payment.id, billId: bill.id, status: PaymentStatus.PENDING },
         data: {
           status: dto.status,
-
           confirmedAt: null,
         },
+      });
+      if (claimed.count !== 1) {
+        throw new ConflictException('El pago ya fue procesado por otra solicitud');
+      }
+      const updatedPayment = await tx.payment.findUniqueOrThrow({
+        where: { id: payment.id },
       });
 
       await this.audit.record(tx, {
@@ -465,6 +577,166 @@ export class PaymentsService {
           status: bill.status,
         },
       };
+    });
+  }
+
+  async reverse(user: JwtUser, billId: string, paymentId: string, dto: ReversePaymentDto) {
+    if (![Role.OWNER, Role.ADMIN, Role.MANAGER, Role.CASHIER].some((role) => role === user.role)) {
+      throw new ForbiddenException('Tu rol no puede revertir pagos confirmados');
+    }
+
+    return serializableTransaction(this.prisma, async (tx) => {
+      const bill = await tx.bill.findFirst({
+        where: { id: billId, location: { businessId: user.businessId } },
+        include: { payments: true, orders: { select: { orderId: true } } },
+      });
+      if (!bill) throw new NotFoundException('Cuenta no encontrada');
+
+      const payment = bill.payments.find(({ id }) => id === paymentId);
+      if (!payment) throw new NotFoundException('Pago no encontrado');
+      if (payment.status === PaymentStatus.REVERSED) return payment;
+      if (payment.status !== PaymentStatus.CONFIRMED) {
+        throw new ConflictException('Solo se pueden revertir pagos confirmados');
+      }
+
+      const handover = payment.method === PaymentMethod.CASH
+        ? await tx.cashHandover.findUnique({ where: { paymentId: payment.id } })
+        : null;
+      let refundSessionId: string | null = null;
+
+      if (handover?.status === CashHandoverStatus.PENDING) {
+        const sessionLock = await tx.cashSession.updateMany({
+          where: { id: handover.cashSessionId, status: CashSessionStatus.OPEN },
+          data: { status: CashSessionStatus.OPEN },
+        });
+        if (sessionLock.count !== 1) {
+          throw new ConflictException('La caja de la entrega ya no está abierta');
+        }
+        const cancelled = await tx.cashHandover.updateMany({
+          where: { id: handover.id, status: CashHandoverStatus.PENDING },
+          data: { status: CashHandoverStatus.CANCELLED },
+        });
+        if (cancelled.count !== 1) {
+          throw new ConflictException('La entrega de efectivo ya fue procesada');
+        }
+        await this.audit.record(tx, {
+          businessId: user.businessId,
+          locationId: bill.locationId,
+          userId: user.userId,
+          action: 'CASH_HANDOVER_CANCELLED',
+          entityType: 'CashHandover',
+          entityId: handover.id,
+          metadata: {
+            paymentId: payment.id,
+            amount: payment.amount.toString(),
+            reason: dto.reason.trim(),
+            source: 'PAYMENT_REVERSED',
+          },
+        });
+      } else if (handover?.status === CashHandoverStatus.CONFIRMED) {
+        const activeSession = await tx.cashSession.findFirst({
+          where: { locationId: bill.locationId, status: CashSessionStatus.OPEN },
+          select: { id: true },
+        });
+        if (!activeSession) {
+          throw new ConflictException('Abre caja para registrar la salida de efectivo de la reversa');
+        }
+        const sessionLock = await tx.cashSession.updateMany({
+          where: { id: activeSession.id, status: CashSessionStatus.OPEN },
+          data: { status: CashSessionStatus.OPEN },
+        });
+        if (sessionLock.count !== 1) {
+          throw new ConflictException('La sesión de caja dejó de estar abierta');
+        }
+        refundSessionId = activeSession.id;
+      } else if (payment.method === PaymentMethod.CASH && !handover) {
+        // Pago directo de caja (por ejemplo, TAKEAWAY sin mesero): la reversa
+        // debe contrarrestar el SALE que se creó al confirmar el pago.
+        const activeSession = await tx.cashSession.findFirst({
+          where: { locationId: bill.locationId, status: CashSessionStatus.OPEN },
+          select: { id: true },
+        });
+        if (!activeSession) {
+          throw new ConflictException('Abre caja para registrar la devolución del pago en efectivo');
+        }
+        const sessionLock = await tx.cashSession.updateMany({
+          where: { id: activeSession.id, status: CashSessionStatus.OPEN },
+          data: { status: CashSessionStatus.OPEN },
+        });
+        if (sessionLock.count !== 1) {
+          throw new ConflictException('La sesión de caja dejó de estar abierta');
+        }
+        refundSessionId = activeSession.id;
+      }
+
+      const reversedAt = new Date();
+      const changed = await tx.payment.updateMany({
+        where: { id: payment.id, status: PaymentStatus.CONFIRMED },
+        data: {
+          status: PaymentStatus.REVERSED,
+          reversedAt,
+          reversedBy: user.userId,
+          reversalReason: dto.reason.trim(),
+        },
+      });
+      if (changed.count !== 1) {
+        throw new ConflictException('El pago ya fue procesado por otra solicitud');
+      }
+
+      let confirmedTotal = new Prisma.Decimal(0);
+      for (const item of bill.payments) {
+        if (item.id !== payment.id && item.status === PaymentStatus.CONFIRMED) {
+          confirmedTotal = confirmedTotal.add(item.amount);
+        }
+      }
+      const billTotal = new Prisma.Decimal(bill.total);
+      const nextBillStatus = confirmedTotal.equals(billTotal)
+        ? BillStatus.PAID
+        : confirmedTotal.greaterThan(0)
+          ? BillStatus.PARTIALLY_PAID
+          : BillStatus.OPEN;
+      await tx.bill.update({ where: { id: bill.id }, data: { status: nextBillStatus } });
+
+      if (refundSessionId) {
+        const refundMovement = await tx.cashMovement.create({
+          data: {
+            cashSessionId: refundSessionId,
+            type: 'REFUND',
+            amount: payment.amount,
+            reason: `Reversa de pago: ${dto.reason.trim()}`,
+            reference: payment.id,
+            createdBy: user.userId,
+          },
+        });
+        await this.audit.record(tx, {
+          businessId: user.businessId,
+          locationId: bill.locationId,
+          userId: user.userId,
+          action: 'CASH_MOVEMENT_REVERSED',
+          entityType: 'CashMovement',
+          entityId: refundMovement.id,
+          metadata: { paymentId: payment.id, amount: payment.amount.toString(), reason: dto.reason.trim() },
+        });
+      }
+
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: bill.locationId,
+        userId: user.userId,
+        action: 'PAYMENT_REVERSED',
+        entityType: 'Payment',
+        entityId: payment.id,
+        metadata: {
+          billId: bill.id,
+          method: payment.method,
+          amount: payment.amount.toString(),
+          reason: dto.reason.trim(),
+          cashMovementCreated: Boolean(refundSessionId),
+          cashSessionId: refundSessionId,
+        },
+      });
+
+      return tx.payment.findUniqueOrThrow({ where: { id: payment.id } });
     });
   }
 }

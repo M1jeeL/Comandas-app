@@ -13,15 +13,16 @@ import {
 import { TableSessionsService } from './table-sessions.service.js';
 
 import { CreateTableSessionDto } from './dto/create-table-session.dto.js';
+import { TransferTableSessionDto } from './dto/transfer-table-session.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 @Controller('table-sessions')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class TableSessionsController {
   constructor(
     private readonly tableSessionsService: TableSessionsService,
@@ -70,5 +71,14 @@ export class TableSessionsController {
       user,
       id,
     );
+  }
+
+  @Patch(':id/transfer')
+  transfer(
+    @CurrentUser() user: JwtUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: TransferTableSessionDto,
+  ) {
+    return this.tableSessionsService.transfer(user, id, dto);
   }
 }

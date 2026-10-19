@@ -17,6 +17,7 @@ import { BillStatus, OrderStatus } from '../../generated/prisma/enums.js';
 
 import { Prisma } from '../../generated/prisma/client.js';
 import { AuditService } from '../audit/audit.service.js';
+import { serializableTransaction } from '../../common/database/serializable-transaction.js';
 
 @Injectable()
 export class BillsService {
@@ -87,7 +88,8 @@ export class BillsService {
    * Crea una cuenta a partir de una o varias órdenes.
    */
   async create(user: JwtUser, dto: CreateBillDto) {
-    return this.prisma.$transaction(async (tx) => {
+    try {
+      return await serializableTransaction(this.prisma, async (tx) => {
       const orders = await tx.order.findMany({
         where: {
           id: {
@@ -258,7 +260,15 @@ export class BillsService {
       });
 
       return bill;
-    });
+      });
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code === 'P2002') {
+        throw new ConflictException(
+          'Una o más órdenes ya fueron asociadas a una cuenta por otra solicitud',
+        );
+      }
+      throw error;
+    }
   }
 
   /**
@@ -360,7 +370,8 @@ export class BillsService {
    * que ya fue pagada o anulada.
    */
   async updateTip(user: JwtUser, id: string, dto: UpdateBillTipDto) {
-    const bill = await this.prisma.bill.findFirst({
+    return serializableTransaction(this.prisma, async (tx) => {
+    const bill = await tx.bill.findFirst({
       where: {
         id,
 
@@ -414,7 +425,6 @@ export class BillsService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
       const updated = await tx.bill.update({
         where: { id: bill.id },
         data: { tipAmount, total },
@@ -443,7 +453,8 @@ export class BillsService {
    * Anula una cuenta.
    */
   async void(user: JwtUser, id: string) {
-    const bill = await this.prisma.bill.findFirst({
+    return serializableTransaction(this.prisma, async (tx) => {
+    const bill = await tx.bill.findFirst({
       where: {
         id,
 
@@ -481,7 +492,6 @@ export class BillsService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
       const voided = await tx.bill.update({
         where: { id: bill.id },
         data: { status: BillStatus.VOID },

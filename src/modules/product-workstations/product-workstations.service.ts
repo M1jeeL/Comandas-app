@@ -20,9 +20,7 @@ export class ProductWorkstationsService {
     const product = await this.prisma.product.findFirst({
       where: {
         id: dto.productId,
-        location: {
-          businessId: user.businessId,
-        },
+        location: { businessId: user.businessId, status: 'ACTIVE' },
       },
     });
 
@@ -35,9 +33,8 @@ export class ProductWorkstationsService {
     const workstation = await this.prisma.workstation.findFirst({
       where: {
         id: dto.workstationId,
-        location: {
-          businessId: user.businessId,
-        },
+        locationId: product.locationId,
+        status: 'ACTIVE',
       },
     });
 
@@ -45,28 +42,17 @@ export class ProductWorkstationsService {
       throw new NotFoundException('Estación de trabajo no encontrada');
     }
 
-    // 3. Evitar relaciones duplicadas
-    const existing = await this.prisma.productWorkstation.findUnique({
-      where: {
-        productId_workstationId: {
-          productId: dto.productId,
-          workstationId: dto.workstationId,
-        },
-      },
-    });
-
-    if (existing) {
-      throw new ConflictException(
-        'El producto ya está asociado a esta estación',
-      );
-    }
-
-    // 4. Crear relación
-    return this.prisma.productWorkstation.create({
-      data: {
-        productId: dto.productId,
-        workstationId: dto.workstationId,
-      },
+    // La asignación es única. POST actúa como reemplazo atómico para que
+    // el producto nunca quede asociado a varias estaciones simultáneamente.
+    return this.prisma.$transaction(async (tx) => {
+      const current = await tx.productWorkstation.findUnique({
+        where: { productId: dto.productId },
+      });
+      if (current?.workstationId === dto.workstationId) return current;
+      await tx.productWorkstation.deleteMany({ where: { productId: dto.productId } });
+      return tx.productWorkstation.create({
+        data: { productId: dto.productId, workstationId: dto.workstationId },
+      });
     });
   }
 
@@ -87,6 +73,7 @@ export class ProductWorkstationsService {
     return this.prisma.productWorkstation.findMany({
       where: {
         productId,
+        workstation: { locationId: product.locationId },
       },
       include: {
         workstation: true,
@@ -116,7 +103,9 @@ export class ProductWorkstationsService {
     return this.prisma.productWorkstation.findMany({
       where: {
         workstationId,
+        workstation: { location: { businessId: user.businessId } },
         product: {
+          locationId: workstation.locationId,
           status: 'ACTIVE',
         },
       },
@@ -132,15 +121,18 @@ export class ProductWorkstationsService {
   }
 
   async remove(user: JwtUser, productId: string, workstationId: string) {
+    const product = await this.prisma.product.findFirst({
+      where: {
+        id: productId,
+        location: { businessId: user.businessId },
+      },
+    });
+    if (!product) throw new NotFoundException('Producto no encontrado');
     const relation = await this.prisma.productWorkstation.findFirst({
       where: {
         productId,
         workstationId,
-        product: {
-          location: {
-            businessId: user.businessId,
-          },
-        },
+        workstation: { locationId: product.locationId },
       },
     });
 

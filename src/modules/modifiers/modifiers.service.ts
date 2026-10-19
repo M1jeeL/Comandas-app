@@ -112,7 +112,8 @@ export class ModifiersService {
   // FIND ALL
   // ============================================================
 
-  async findAll(user: JwtUser, productId?: string, groupId?: string) {
+  async findAll(user: JwtUser, productId?: string, groupId?: string, locationId?: string) {
+    const scopedLocationId = locationId ?? (user.role === 'OWNER' || user.role === 'ADMIN' ? undefined : user.locationId);
     return this.prisma.modifier.findMany({
       where: {
         active: true,
@@ -126,6 +127,7 @@ export class ModifiersService {
         }),
 
         product: {
+          ...(scopedLocationId ? { locationId: scopedLocationId } : {}),
           location: {
             businessId: user.businessId,
           },

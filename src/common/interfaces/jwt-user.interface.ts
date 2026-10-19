@@ -4,6 +4,7 @@ export interface JwtUser {
   userId: string;
   businessId: string;
   membershipId: string;
+  locationId: string;
   role: Role;
   sessionId: string;
 }

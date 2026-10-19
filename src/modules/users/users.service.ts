@@ -44,6 +44,9 @@ export class UsersService {
    */
   async create(user: JwtUser, dto: CreateUserDto) {
     this.validateRoleAssignment(user.role, dto.role);
+    if (user.role === Role.MANAGER && dto.locationId !== user.locationId) {
+      throw new ForbiddenException('Un MANAGER solo puede crear personal para su local asignado');
+    }
     const email = dto.email.trim().toLowerCase();
     if (dto.firstName.trim().length < 2 || dto.lastName.trim().length < 2) {
       throw new BadRequestException('Nombre y apellido deben tener al menos 2 caracteres');
@@ -121,6 +124,8 @@ export class UsersService {
         memberships: {
           some: {
             businessId: user.businessId,
+            ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
+            ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
           },
         },
       },
@@ -131,6 +136,8 @@ export class UsersService {
         memberships: {
           where: {
             businessId: user.businessId,
+            ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
+            ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
           },
 
           select: {
@@ -163,6 +170,7 @@ export class UsersService {
         memberships: {
           some: {
             businessId: user.businessId,
+            ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
           },
         },
       },
@@ -173,6 +181,7 @@ export class UsersService {
         memberships: {
           where: {
             businessId: user.businessId,
+            ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
           },
 
           select: {
@@ -206,6 +215,7 @@ export class UsersService {
         memberships: {
           some: {
             businessId: user.businessId,
+            ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
           },
         },
       },
@@ -214,6 +224,7 @@ export class UsersService {
         memberships: {
           where: {
             businessId: user.businessId,
+            ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
           },
         },
       },
@@ -249,6 +260,9 @@ export class UsersService {
       this.validateRoleAssignment(user.role, dto.role);
     }
     if (dto.locationId !== undefined) {
+      if (user.role === Role.MANAGER && dto.locationId !== user.locationId) {
+        throw new ForbiddenException('Un MANAGER no puede mover personal a otro local');
+      }
       const location = await this.prisma.location.findFirst({
         where: { id: dto.locationId, businessId: user.businessId, status: 'ACTIVE' },
         select: { id: true },

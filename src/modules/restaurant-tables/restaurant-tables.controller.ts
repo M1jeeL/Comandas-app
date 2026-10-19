@@ -15,15 +15,16 @@ import { RestaurantTablesService } from './restaurant-tables.service.js';
 
 import { CreateRestaurantTableDto } from './dto/create-restaurant-table.dto.js';
 import { UpdateRestaurantTableDto } from './dto/update-restaurant-table.dto.js';
+import { UpdateTableOperationalStatusDto } from './dto/update-table-operational-status.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorators.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 @Controller('restaurant-tables')
-@UseGuards(JwtAuthGuard)
+@UseGuards(ScopedJwtAuthGuard)
 export class RestaurantTablesController {
   constructor(
     private readonly restaurantTablesService: RestaurantTablesService,
@@ -57,6 +58,15 @@ export class RestaurantTablesController {
     @Body() dto: UpdateRestaurantTableDto,
   ) {
     return this.restaurantTablesService.update(user, id, dto);
+  }
+
+  @Patch(':id/operational-status')
+  updateOperationalStatus(
+    @CurrentUser() user: JwtUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateTableOperationalStatusDto,
+  ) {
+    return this.restaurantTablesService.updateOperationalStatus(user, id, dto);
   }
 
   @Delete(':id')

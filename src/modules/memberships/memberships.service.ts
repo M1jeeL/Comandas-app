@@ -68,6 +68,9 @@ export class MembershipsService {
    * Crear Membership dentro del Business actual.
    */
   async create(user: JwtUser, dto: CreateMembershipDto) {
+    if (user.role === Role.MANAGER && dto.locationId !== user.locationId) {
+      throw new ForbiddenException('Un MANAGER solo puede asignar personal a su local');
+    }
     const targetUser = await this.prisma.user.findUnique({
       where: {
         id: dto.userId,
@@ -143,6 +146,7 @@ export class MembershipsService {
     return this.prisma.membership.findMany({
       where: {
         businessId: user.businessId,
+        ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
       },
 
       include: {
@@ -171,6 +175,7 @@ export class MembershipsService {
       where: {
         id,
         businessId: user.businessId,
+        ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
       },
 
       include: {
@@ -201,6 +206,7 @@ export class MembershipsService {
       where: {
         id,
         businessId: user.businessId,
+        ...(user.role === Role.MANAGER ? { locationId: user.locationId } : {}),
       },
     });
 
@@ -238,6 +244,9 @@ export class MembershipsService {
     }
 
     if (dto.locationId !== undefined) {
+      if (user.role === Role.MANAGER && dto.locationId !== user.locationId) {
+        throw new ForbiddenException('Un MANAGER no puede mover una membresía a otro local');
+      }
       const location = await this.prisma.location.findFirst({
         where: { id: dto.locationId, businessId: user.businessId, status: 'ACTIVE' },
         select: { id: true },

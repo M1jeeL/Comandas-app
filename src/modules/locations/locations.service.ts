@@ -44,6 +44,7 @@ export class LocationsService {
     return this.prisma.location.findMany({
       where: {
         businessId: user.businessId,
+        ...(user.role !== 'OWNER' && user.role !== 'ADMIN' ? { id: user.locationId } : {}),
       },
       orderBy: {
         createdAt: 'desc',
@@ -54,8 +55,8 @@ export class LocationsService {
   async findOne(user: JwtUser, id: string) {
     const location = await this.prisma.location.findUnique({
       where: {
-        id,
         businessId: user.businessId,
+        ...(user.role !== 'OWNER' && user.role !== 'ADMIN' ? { id: user.locationId } : { id }),
       },
     });
 

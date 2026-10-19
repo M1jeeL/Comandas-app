@@ -20,10 +20,14 @@ import {
 
 import { Prisma } from '../../generated/prisma/client.js';
 import { AuditService } from '../audit/audit.service.js';
+import { serializableTransaction } from '../../common/database/serializable-transaction.js';
 
 @Injectable()
 export class CashSessionsService {
-  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   /**
    * Verifica que la Location pertenezca
@@ -51,47 +55,60 @@ export class CashSessionsService {
   async open(user: JwtUser, locationId: string, dto: OpenCashSessionDto) {
     await this.findLocationForUser(user, locationId);
 
-    return this.prisma.$transaction(async (tx) => {
-      /**
-       * Verificar si ya existe
-       * una sesión abierta.
-       */
-      const existingSession = await tx.cashSession.findFirst({
-        where: {
+    try {
+      return await serializableTransaction(this.prisma, async (tx) => {
+        /**
+         * Verificar si ya existe
+         * una sesión abierta.
+         */
+        const existingSession = await tx.cashSession.findFirst({
+          where: {
+            locationId,
+
+            status: CashSessionStatus.OPEN,
+          },
+        });
+
+        if (existingSession) {
+          throw new ConflictException(
+            'Ya existe una sesión de caja abierta para esta localización',
+          );
+        }
+
+        const openingAmount = new Prisma.Decimal(dto.openingAmount);
+
+        const session = await tx.cashSession.create({
+          data: {
+            locationId,
+
+            openedBy: user.userId,
+
+            status: CashSessionStatus.OPEN,
+
+            openingAmount,
+          },
+        });
+
+        await this.audit.record(tx, {
+          businessId: user.businessId,
           locationId,
+          userId: user.userId,
+          action: 'CASH_SESSION_OPENED',
+          entityType: 'CashSession',
+          entityId: session.id,
+          metadata: { openingAmount: openingAmount.toString() },
+        });
 
-          status: CashSessionStatus.OPEN,
-        },
+        return session;
       });
-
-      if (existingSession) {
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code === 'P2002') {
         throw new ConflictException(
           'Ya existe una sesión de caja abierta para esta localización',
         );
       }
-
-      const openingAmount = new Prisma.Decimal(dto.openingAmount);
-
-      const session = await tx.cashSession.create({
-        data: {
-          locationId,
-
-          openedBy: user.userId,
-
-          status: CashSessionStatus.OPEN,
-
-          openingAmount,
-        },
-      });
-
-      await this.audit.record(tx, {
-        businessId: user.businessId, locationId, userId: user.userId,
-        action: 'CASH_SESSION_OPENED', entityType: 'CashSession', entityId: session.id,
-        metadata: { openingAmount: openingAmount.toString() },
-      });
-
-      return session;
-    });
+      throw error;
+    }
   }
 
   /**
@@ -125,8 +142,55 @@ export class CashSessionsService {
     if (!session) {
       throw new NotFoundException('No existe una sesión de caja abierta');
     }
-
-    return session;
+    const salePaymentIds = session.movements
+      .filter(
+        (movement) =>
+          movement.type === CashMovementType.SALE && movement.reference,
+      )
+      .map((movement) => movement.reference!);
+    const payments = salePaymentIds.length
+      ? await this.prisma.payment.findMany({
+          where: { id: { in: salePaymentIds }, bill: { locationId } },
+          select: {
+            id: true,
+            method: true,
+            status: true,
+            amount: true,
+            bill: {
+              select: {
+                id: true,
+                orders: {
+                  select: {
+                    order: {
+                      select: {
+                        id: true,
+                        type: true,
+                        customerName: true,
+                        tableSession: {
+                          select: { table: { select: { name: true } } },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        })
+      : [];
+    const paymentById = new Map(
+      payments.map((payment) => [payment.id, payment]),
+    );
+    return {
+      ...session,
+      movements: session.movements.map((movement) => ({
+        ...movement,
+        directPayment:
+          movement.type === CashMovementType.SALE && movement.reference
+            ? (paymentById.get(movement.reference) ?? null)
+            : null,
+      })),
+    };
   }
 
   /**
@@ -179,7 +243,7 @@ export class CashSessionsService {
    * exclusivamente desde CashMovement.
    */
   async close(user: JwtUser, id: string, dto: CloseCashSessionDto) {
-    return this.prisma.$transaction(async (tx) => {
+    return serializableTransaction(this.prisma, async (tx) => {
       const session = await tx.cashSession.findFirst({
         where: {
           id,
@@ -232,6 +296,7 @@ export class CashSessionsService {
             return total.add(amount);
 
           case CashMovementType.WITHDRAWAL:
+          case CashMovementType.REFUND:
             return total.sub(amount);
 
           default:
@@ -267,11 +332,8 @@ export class CashSessionsService {
        * Cerrar sesión
        * ------------------------------------------------
        */
-      const closedSession = await tx.cashSession.update({
-        where: {
-          id: session.id,
-        },
-
+      const closed = await tx.cashSession.updateMany({
+        where: { id: session.id, status: CashSessionStatus.OPEN },
         data: {
           status: CashSessionStatus.CLOSED,
 
@@ -286,11 +348,25 @@ export class CashSessionsService {
           difference,
         },
       });
+      if (closed.count !== 1) {
+        throw new ConflictException('La sesión de caja ya fue cerrada');
+      }
+      const closedSession = await tx.cashSession.findUniqueOrThrow({
+        where: { id: session.id },
+      });
 
       await this.audit.record(tx, {
-        businessId: user.businessId, locationId: session.locationId, userId: user.userId,
-        action: 'CASH_SESSION_CLOSED', entityType: 'CashSession', entityId: session.id,
-        metadata: { closingAmount: closingAmount.toString(), expectedAmount: expectedAmount.toString(), difference: difference.toString() },
+        businessId: user.businessId,
+        locationId: session.locationId,
+        userId: user.userId,
+        action: 'CASH_SESSION_CLOSED',
+        entityType: 'CashSession',
+        entityId: session.id,
+        metadata: {
+          closingAmount: closingAmount.toString(),
+          expectedAmount: expectedAmount.toString(),
+          difference: difference.toString(),
+        },
       });
 
       return closedSession;

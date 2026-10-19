@@ -13,7 +13,7 @@ import { MembershipsService } from './memberships.service.js';
 import { CreateMembershipDto } from './dto/create-membership.dto.js';
 import { UpdateMembershipDto } from './dto/update-membership.dto.js';
 
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 import { RolesGuard } from '../../common/guards/roles.guard.js';
 import { Roles } from '../auth/decorators/roles.decorators.js';
 
@@ -23,7 +23,7 @@ import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 import { Role } from '../../generated/prisma/enums.js';
 
 @Controller('memberships')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(ScopedJwtAuthGuard, RolesGuard)
 export class MembershipsController {
   constructor(private readonly membershipsService: MembershipsService) {}
 

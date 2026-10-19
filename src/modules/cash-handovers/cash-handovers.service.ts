@@ -18,6 +18,7 @@ import {
   CashMovementType,
   CashSessionStatus,
 } from '../../generated/prisma/enums.js';
+import { serializableTransaction } from '../../common/database/serializable-transaction.js';
 
 @Injectable()
 export class CashHandoversService {
@@ -179,7 +180,7 @@ export class CashHandoversService {
   async confirm(user: JwtUser, id: string) {
     await this.validateCashierRole(user);
 
-    return this.prisma.$transaction(async (tx) => {
+    return serializableTransaction(this.prisma, async (tx) => {
       const handover = await tx.cashHandover.findFirst({
         where: {
           id,
@@ -200,10 +201,20 @@ export class CashHandoversService {
         throw new NotFoundException('Entrega de efectivo no encontrada');
       }
 
+      if (handover.status === CashHandoverStatus.CONFIRMED) return handover;
+
       if (handover.cashSession.status !== CashSessionStatus.OPEN) {
         throw new ConflictException(
           'No se puede confirmar una entrega con la sesión de caja cerrada',
         );
+      }
+
+      const sessionLock = await tx.cashSession.updateMany({
+        where: { id: handover.cashSessionId, status: CashSessionStatus.OPEN },
+        data: { status: CashSessionStatus.OPEN },
+      });
+      if (sessionLock.count !== 1) {
+        throw new ConflictException('La sesión de caja dejó de estar abierta');
       }
 
       if (handover.status !== CashHandoverStatus.PENDING) {
@@ -214,16 +225,19 @@ export class CashHandoversService {
 
       const confirmedAt = new Date();
 
-      const confirmed = await tx.cashHandover.update({
-        where: {
-          id: handover.id,
-        },
-
+      const changed = await tx.cashHandover.updateMany({
+        where: { id: handover.id, status: CashHandoverStatus.PENDING },
         data: {
           status: CashHandoverStatus.CONFIRMED,
           receivedBy: user.userId,
           confirmedAt,
         },
+      });
+      if (changed.count !== 1) {
+        throw new ConflictException('La entrega ya fue procesada por otra solicitud');
+      }
+      const confirmed = await tx.cashHandover.findUniqueOrThrow({
+        where: { id: handover.id },
       });
 
       await tx.cashMovement.create({
@@ -255,7 +269,7 @@ export class CashHandoversService {
   async reject(user: JwtUser, id: string, dto: RejectCashHandoverDto) {
     await this.validateCashierRole(user);
 
-    return this.prisma.$transaction(async (tx) => {
+    return serializableTransaction(this.prisma, async (tx) => {
       const handover = await tx.cashHandover.findFirst({
         where: {
           id,
@@ -276,10 +290,20 @@ export class CashHandoversService {
         throw new NotFoundException('Entrega de efectivo no encontrada');
       }
 
+      if (handover.status === CashHandoverStatus.REJECTED) return handover;
+
       if (handover.cashSession.status !== CashSessionStatus.OPEN) {
         throw new ConflictException(
           'No se puede rechazar una entrega con la sesión de caja cerrada',
         );
+      }
+
+      const sessionLock = await tx.cashSession.updateMany({
+        where: { id: handover.cashSessionId, status: CashSessionStatus.OPEN },
+        data: { status: CashSessionStatus.OPEN },
+      });
+      if (sessionLock.count !== 1) {
+        throw new ConflictException('La sesión de caja dejó de estar abierta');
       }
 
       if (handover.status !== CashHandoverStatus.PENDING) {
@@ -288,15 +312,18 @@ export class CashHandoversService {
         );
       }
 
-      const rejected = await tx.cashHandover.update({
-        where: {
-          id: handover.id,
-        },
-
+      const changed = await tx.cashHandover.updateMany({
+        where: { id: handover.id, status: CashHandoverStatus.PENDING },
         data: {
           status: CashHandoverStatus.REJECTED,
           rejectReason: dto.reason.trim(),
         },
+      });
+      if (changed.count !== 1) {
+        throw new ConflictException('La entrega ya fue procesada por otra solicitud');
+      }
+      const rejected = await tx.cashHandover.findUniqueOrThrow({
+        where: { id: handover.id },
       });
       await this.audit.record(tx, {
         businessId: user.businessId, locationId: handover.cashSession.locationId, userId: user.userId,

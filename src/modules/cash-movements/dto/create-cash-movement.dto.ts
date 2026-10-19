@@ -3,6 +3,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
   Min,
 } from 'class-validator';
@@ -10,6 +11,9 @@ import {
 import { CashMovementType } from '../../../generated/prisma/enums.js';
 
 export class CreateCashMovementDto {
+  @IsUUID()
+  idempotencyKey: string;
+
   @IsEnum(CashMovementType)
   type: CashMovementType;
 

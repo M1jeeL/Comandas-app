@@ -27,14 +27,9 @@ export class PreparationTicketsService {
         workstation: {
           location: {
             businessId: user.businessId,
+            ...(locationId ? { id: locationId } : {}),
           },
         },
-
-        ...(locationId && {
-          workstation: {
-            locationId,
-          },
-        }),
       },
 
       include: {

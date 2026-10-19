@@ -1,4 +1,4 @@
-import { IsEnum, IsOptional } from 'class-validator';
+import { IsEnum, IsOptional, IsUUID } from 'class-validator';
 import { MembershipStatus, Role } from '../../../generated/prisma/enums.js';
 
 export class UpdateMembershipDto {
@@ -9,4 +9,8 @@ export class UpdateMembershipDto {
   @IsOptional()
   @IsEnum(MembershipStatus)
   status?: MembershipStatus;
+
+  @IsOptional()
+  @IsUUID()
+  locationId?: string;
 }

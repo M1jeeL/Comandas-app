@@ -15,10 +15,11 @@ import { CreateDiscountDto } from './dto/create-discount.dto.js';
 import { BillStatus, DiscountType } from '../../generated/prisma/enums.js';
 
 import { Prisma } from '../../generated/prisma/client.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class DiscountsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   /**
    * Busca una Bill verificando que pertenezca
@@ -224,6 +225,12 @@ export class DiscountsService {
         },
       });
 
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: bill.locationId, userId: user.userId,
+        action: 'DISCOUNT_APPLIED', entityType: 'Discount', entityId: discount.id,
+        metadata: { billId: bill.id, type: discount.type, value: discount.value.toString(), amount: discount.amount.toString(), reason: discount.reason },
+      });
+
       return {
         discount,
 
@@ -349,6 +356,12 @@ export class DiscountsService {
 
           total: newTotal,
         },
+      });
+
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: bill.locationId, userId: user.userId,
+        action: 'DISCOUNT_REMOVED', entityType: 'Discount', entityId: discount.id,
+        metadata: { billId: bill.id, type: discount.type, amount: discount.amount.toString(), reason: discount.reason },
       });
 
       return {

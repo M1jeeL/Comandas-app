@@ -11,6 +11,7 @@ import { PrismaService } from '../../prisma.service.js';
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 import { RejectCashHandoverDto } from './dto/reject-cash-handover.dto.js';
+import { AuditService } from '../audit/audit.service.js';
 
 import {
   CashHandoverStatus,
@@ -20,7 +21,7 @@ import {
 
 @Injectable()
 export class CashHandoversService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   /**
    * Verifica que una sesión de caja
@@ -236,6 +237,12 @@ export class CashHandoversService {
         },
       });
 
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: handover.cashSession.locationId, userId: user.userId,
+        action: 'CASH_HANDOVER_ACCEPTED', entityType: 'CashHandover', entityId: handover.id,
+        metadata: { amount: handover.amount.toString(), paymentId: handover.paymentId },
+      });
+
       return confirmed;
     });
   }
@@ -281,7 +288,7 @@ export class CashHandoversService {
         );
       }
 
-      return tx.cashHandover.update({
+      const rejected = await tx.cashHandover.update({
         where: {
           id: handover.id,
         },
@@ -291,6 +298,12 @@ export class CashHandoversService {
           rejectReason: dto.reason.trim(),
         },
       });
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: handover.cashSession.locationId, userId: user.userId,
+        action: 'CASH_HANDOVER_REJECTED', entityType: 'CashHandover', entityId: handover.id,
+        metadata: { amount: handover.amount.toString(), reason: dto.reason.trim(), paymentId: handover.paymentId },
+      });
+      return rejected;
     });
   }
 }

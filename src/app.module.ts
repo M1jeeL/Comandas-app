@@ -28,6 +28,8 @@ import { PaymentsModule } from './modules/payments/payments.module.js';
 import { CashSessionsModule } from './modules/cash-sessions/cash-sessions.module.js';
 import { CashMovementsModule } from './modules/cash-movements/cash-movements.module.js';
 import { CashHandoversModule } from './modules/cash-handovers/cash-handovers.module.js';
+import { AuditModule } from './modules/audit/audit.module.js';
+import { ReportsModule } from './modules/reports/reports.module.js';
 
 @Global()
 @Module({
@@ -60,6 +62,8 @@ import { CashHandoversModule } from './modules/cash-handovers/cash-handovers.mod
     CashSessionsModule,
     CashMovementsModule,
     CashHandoversModule,
+    AuditModule,
+    ReportsModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService],

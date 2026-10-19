@@ -18,13 +18,18 @@ import {
   CashSessionStatus,
   PaymentMethod,
   PaymentStatus,
+  OrderStatus,
 } from '../../generated/prisma/enums.js';
 
 import { Prisma } from '../../generated/prisma/client.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class PaymentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
   private async findCashResponsibleWaiter(
     tx: Prisma.TransactionClient,
     billId: string,
@@ -163,8 +168,16 @@ export class PaymentsService {
       const amount = new Prisma.Decimal(dto.amount);
 
       const confirmedTotal = this.calculateConfirmedTotal(bill.payments);
+      const pendingTotal = bill.payments
+        .filter((payment) => payment.status === PaymentStatus.PENDING)
+        .reduce(
+          (total, payment) => total.add(payment.amount),
+          new Prisma.Decimal(0),
+        );
 
-      const remaining = new Prisma.Decimal(bill.total).sub(confirmedTotal);
+      const remaining = new Prisma.Decimal(bill.total)
+        .sub(confirmedTotal)
+        .sub(pendingTotal);
 
       if (amount.greaterThan(remaining)) {
         throw new BadRequestException(
@@ -190,6 +203,16 @@ export class PaymentsService {
         },
       });
 
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: bill.locationId,
+        userId: user.userId,
+        action: 'PAYMENT_CREATED',
+        entityType: 'Payment',
+        entityId: payment.id,
+        metadata: { billId: bill.id, method: payment.method, amount: payment.amount.toString() },
+      });
+
       return {
         payment,
 
@@ -199,6 +222,8 @@ export class PaymentsService {
           total: bill.total,
 
           confirmedPaid: confirmedTotal,
+
+          pendingAmount: pendingTotal,
 
           remaining,
         },
@@ -325,6 +350,16 @@ export class PaymentsService {
           },
         });
 
+        await this.audit.record(tx, {
+          businessId: user.businessId,
+          locationId: bill.locationId,
+          userId: user.userId,
+          action: 'PAYMENT_CONFIRMED',
+          entityType: 'Payment',
+          entityId: payment.id,
+          metadata: { billId: bill.id, method: payment.method, amount: payment.amount.toString() },
+        });
+
         // -----------------------------------------
         // Actualizar Bill
         // -----------------------------------------
@@ -346,6 +381,21 @@ export class PaymentsService {
             status: newBillStatus,
           },
         });
+
+        if (newBillStatus === BillStatus.PAID) {
+          const billOrders = await tx.billOrder.findMany({
+            where: { billId: bill.id },
+            select: { orderId: true },
+          });
+
+          await tx.order.updateMany({
+            where: {
+              id: { in: billOrders.map(({ orderId }) => orderId) },
+              status: OrderStatus.DELIVERED,
+            },
+            data: { status: OrderStatus.CLOSED },
+          });
+        }
 
         if (payment.method === PaymentMethod.CASH) {
           const cashSession = await this.findOpenCashSession(
@@ -394,6 +444,16 @@ export class PaymentsService {
 
           confirmedAt: null,
         },
+      });
+
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: bill.locationId,
+        userId: user.userId,
+        action: dto.status === PaymentStatus.REJECTED ? 'PAYMENT_REJECTED' : 'PAYMENT_CANCELLED',
+        entityType: 'Payment',
+        entityId: payment.id,
+        metadata: { billId: bill.id, method: payment.method, amount: payment.amount.toString() },
       });
 
       return {

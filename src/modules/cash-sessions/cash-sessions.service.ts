@@ -19,10 +19,11 @@ import {
 } from '../../generated/prisma/enums.js';
 
 import { Prisma } from '../../generated/prisma/client.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class CashSessionsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   /**
    * Verifica que la Location pertenezca
@@ -81,6 +82,12 @@ export class CashSessionsService {
 
           openingAmount,
         },
+      });
+
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId, userId: user.userId,
+        action: 'CASH_SESSION_OPENED', entityType: 'CashSession', entityId: session.id,
+        metadata: { openingAmount: openingAmount.toString() },
       });
 
       return session;
@@ -278,6 +285,12 @@ export class CashSessionsService {
 
           difference,
         },
+      });
+
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: session.locationId, userId: user.userId,
+        action: 'CASH_SESSION_CLOSED', entityType: 'CashSession', entityId: session.id,
+        metadata: { closingAmount: closingAmount.toString(), expectedAmount: expectedAmount.toString(), difference: difference.toString() },
       });
 
       return closedSession;

@@ -363,6 +363,7 @@ model Location {
   orders         Order[]
   bills          Bill[]
   cashSessions   CashSession[]
+  memberships    Membership[]
   modifierGroups ModifierGroup[]
   auditLogs      AuditLog[]
   suscription    Subscription?
@@ -406,6 +407,7 @@ model Membership {
   id         String           @id @default(uuid())
   userId     String
   businessId String
+  locationId String
   role       Role
   status     MembershipStatus @default(ACTIVE)
   createdAt  DateTime         @default(now())
@@ -413,11 +415,13 @@ model Membership {
 
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
   refreshSessions RefreshSession[]
 
   @@unique([userId, businessId])
   @@index([businessId, status])
   @@index([userId, status])
+  @@index([locationId, status])
 }
 
 // ============================================================

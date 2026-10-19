@@ -13,10 +13,11 @@ import { UpdateMembershipDto } from './dto/update-membership.dto.js';
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 
 import { MembershipStatus, Role } from '../../generated/prisma/enums.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class MembershipsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   /**
    * Valida que el usuario objetivo pueda recibir
@@ -82,6 +83,12 @@ export class MembershipsService {
      */
     this.validateRoleAssignment(user.role, dto.role);
 
+    const location = await this.prisma.location.findFirst({
+      where: { id: dto.locationId, businessId: user.businessId, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    if (!location) throw new NotFoundException('La sucursal seleccionada no pertenece al negocio o está inactiva');
+
     /**
      * Verificar si ya existe una membership
      * para este usuario dentro del Business.
@@ -99,15 +106,16 @@ export class MembershipsService {
       );
     }
 
-    return this.prisma.membership.create({
-      data: {
-        userId: dto.userId,
-        businessId: user.businessId,
-        role: dto.role,
-        status: MembershipStatus.ACTIVE,
-      },
-
-      include: {
+    return this.prisma.$transaction(async (tx) => {
+      const membership = await tx.membership.create({
+        data: {
+          userId: dto.userId,
+          businessId: user.businessId,
+          locationId: location.id,
+          role: dto.role,
+          status: MembershipStatus.ACTIVE,
+        },
+        include: {
         user: {
           select: {
             id: true,
@@ -116,7 +124,15 @@ export class MembershipsService {
             lastName: true,
           },
         },
+        location: { select: { id: true, name: true } },
       },
+      });
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: location.id, userId: user.userId,
+        action: 'MEMBERSHIP_CREATED', entityType: 'Membership', entityId: membership.id,
+        metadata: { userId: dto.userId, role: membership.role, status: membership.status },
+      });
+      return membership;
     });
   }
 
@@ -138,6 +154,7 @@ export class MembershipsService {
             lastName: true,
           },
         },
+        location: { select: { id: true, name: true } },
       },
 
       orderBy: {
@@ -165,6 +182,7 @@ export class MembershipsService {
             lastName: true,
           },
         },
+        location: { select: { id: true, name: true } },
       },
     });
 
@@ -190,6 +208,18 @@ export class MembershipsService {
       throw new NotFoundException('Membership no encontrada');
     }
 
+    const operationalRoles: Role[] = [Role.WAITER, Role.KITCHEN, Role.CASHIER];
+    const privilegedRoles: Role[] = [Role.OWNER, Role.ADMIN];
+    if (user.role === Role.MANAGER && !operationalRoles.includes(membership.role)) {
+      throw new ForbiddenException('Un MANAGER solo puede modificar usuarios operativos');
+    }
+    if (user.role === Role.ADMIN && privilegedRoles.includes(membership.role)) {
+      throw new ForbiddenException('Un ADMIN no puede modificar a otro ADMIN ni al OWNER');
+    }
+    if (membership.userId === user.userId && (dto.status === MembershipStatus.INACTIVE || (dto.role && dto.role !== membership.role))) {
+      throw new ForbiddenException('No puedes desactivar tu propia cuenta ni cambiar tu propio rol');
+    }
+
     /**
      * Nunca permitimos modificar al OWNER
      * desde una cuenta inferior.
@@ -207,25 +237,21 @@ export class MembershipsService {
       this.validateRoleAssignment(user.role, dto.role);
     }
 
+    if (dto.locationId !== undefined) {
+      const location = await this.prisma.location.findFirst({
+        where: { id: dto.locationId, businessId: user.businessId, status: 'ACTIVE' },
+        select: { id: true },
+      });
+      if (!location) throw new NotFoundException('La sucursal seleccionada no pertenece al negocio o está inactiva');
+    }
+
     /**
      * Un ADMIN no puede modificar otro ADMIN.
      */
-    if (
-      user.role === Role.ADMIN &&
-      membership.role === Role.ADMIN &&
-      dto.role !== Role.ADMIN
-    ) {
-      throw new ForbiddenException(
-        'Un ADMIN no puede modificar el rol de otro ADMIN',
-      );
-    }
-
-    return this.prisma.membership.update({
-      where: {
-        id: membership.id,
-      },
-
-      data: {
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.membership.update({
+        where: { id: membership.id },
+        data: {
         ...(dto.role !== undefined && {
           role: dto.role,
         }),
@@ -233,9 +259,9 @@ export class MembershipsService {
         ...(dto.status !== undefined && {
           status: dto.status,
         }),
-      },
-
-      include: {
+        ...(dto.locationId !== undefined && { locationId: dto.locationId }),
+        },
+        include: {
         user: {
           select: {
             id: true,
@@ -244,7 +270,22 @@ export class MembershipsService {
             lastName: true,
           },
         },
+        location: { select: { id: true, name: true } },
       },
+      });
+      if (dto.role !== undefined || dto.status !== undefined || dto.locationId !== undefined) {
+        await this.audit.record(tx, {
+          businessId: user.businessId, locationId: dto.locationId ?? membership.locationId, userId: user.userId,
+          action: dto.role && dto.role !== membership.role ? 'MEMBERSHIP_ROLE_CHANGED' : 'MEMBERSHIP_UPDATED',
+          entityType: 'Membership', entityId: membership.id,
+          metadata: {
+            ...(dto.role !== undefined && { role: { from: membership.role, to: dto.role } }),
+            ...(dto.status !== undefined && { status: { from: membership.status, to: dto.status } }),
+            ...(dto.locationId !== undefined && { locationId: { from: membership.locationId, to: dto.locationId } }),
+          },
+        });
+      }
+      return updated;
     });
   }
 

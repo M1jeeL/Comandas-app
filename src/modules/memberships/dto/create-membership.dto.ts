@@ -7,4 +7,7 @@ export class CreateMembershipDto {
 
   @IsEnum(Role)
   role: Role;
+
+  @IsUUID()
+  locationId: string;
 }

@@ -21,10 +21,11 @@ import {
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 import { UpdateOrderItemDto } from './dto/update-order-item.dto.js';
 import { Prisma } from '../../generated/prisma/client.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   /**
    * Verifica que la ubicación pertenezca
@@ -649,8 +650,9 @@ export class OrdersService {
     // 7. Crear Order
     // --------------------------------------------------
 
-    return this.prisma.order.create({
-      data: {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.create({
+        data: {
         locationId: dto.locationId,
 
         tableSessionId: dto.tableSessionId,
@@ -668,7 +670,14 @@ export class OrdersService {
         customerName: dto.customerName?.trim(),
 
         notes: dto.notes?.trim(),
-      },
+        },
+      });
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: order.locationId, userId: user.userId,
+        action: 'ORDER_CREATED', entityType: 'Order', entityId: order.id,
+        metadata: { type: order.type, status: order.status, tableSessionId: order.tableSessionId },
+      });
+      return order;
     });
   }
 
@@ -795,6 +804,17 @@ export class OrdersService {
         },
       });
 
+      const action = dto.status === OrderStatus.SENT ? 'ORDER_SENT'
+        : dto.status === OrderStatus.READY ? 'ORDER_READY'
+        : dto.status === OrderStatus.DELIVERED ? 'ORDER_DELIVERED'
+        : dto.status === OrderStatus.CLOSED ? 'ORDER_CLOSED'
+        : 'STATUS_CHANGE';
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: order.locationId, userId: user.userId,
+        action, entityType: 'Order', entityId: order.id,
+        metadata: { from: order.status, to: dto.status },
+      });
+
       const preparationTickets =
         order.status === OrderStatus.DRAFT && dto.status === OrderStatus.SENT
           ? await this.createPreparationTickets(tx, order.id)
@@ -825,13 +845,14 @@ export class OrdersService {
 
     this.validateStatusTransition(order.status, OrderStatus.CANCELLED);
 
-    return this.prisma.order.update({
-      where: {
-        id,
-      },
-      data: {
-        status: OrderStatus.CANCELLED,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const cancelled = await tx.order.update({ where: { id }, data: { status: OrderStatus.CANCELLED } });
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: order.locationId, userId: user.userId,
+        action: 'ORDER_CANCELLED', entityType: 'Order', entityId: order.id,
+        metadata: { from: order.status, to: OrderStatus.CANCELLED },
+      });
+      return cancelled;
     });
   }
 }

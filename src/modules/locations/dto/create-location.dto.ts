@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class CreateLocationDto {
   @IsString()
@@ -19,5 +19,6 @@ export class CreateLocationDto {
   @IsOptional()
   @IsString()
   @MaxLength(3)
+  @Matches(/^[A-Z]{3}$/)
   currency?: string;
 }

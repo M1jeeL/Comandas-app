@@ -74,6 +74,7 @@ export class AuthService {
         data: {
           userId: user.id,
           businessId: business.id,
+          locationId: location.id,
           role: 'OWNER',
           status: 'ACTIVE',
         },

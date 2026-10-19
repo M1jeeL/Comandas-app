@@ -10,6 +10,7 @@ import { PrismaService } from '../../prisma.service.js';
 import { CreateTableSessionDto } from './dto/create-table-session.dto.js';
 
 import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
+import { Prisma } from '../../generated/prisma/client.js';
 
 @Injectable()
 export class TableSessionsService {
@@ -84,7 +85,7 @@ export class TableSessionsService {
     const existingSession = await this.prisma.tableSession.findFirst({
       where: {
         tableId: dto.tableId,
-        status: 'OPEN',
+        status: { in: ['OPEN', 'CLOSING'] },
       },
     });
 
@@ -93,13 +94,25 @@ export class TableSessionsService {
     }
 
     // 5. Crear sesión.
-    return this.prisma.tableSession.create({
-      data: {
-        tableId: dto.tableId,
-        waiterId: dto.waiterId,
-        status: 'OPEN',
-      },
-    });
+    try {
+      return await this.prisma.tableSession.create({
+        data: {
+          tableId: dto.tableId,
+          waiterId: dto.waiterId,
+          status: 'OPEN',
+        },
+      });
+    } catch (error) {
+      // La restricción única de PostgreSQL cubre la carrera entre solicitudes.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException('La mesa ya tiene una sesión activa');
+      }
+
+      throw error;
+    }
   }
 
   /**
@@ -122,7 +135,7 @@ export class TableSessionsService {
 
     return this.prisma.tableSession.findMany({
       where: {
-        status: 'OPEN',
+        status: { in: ['OPEN', 'CLOSING'] },
         table: {
           locationId,
         },

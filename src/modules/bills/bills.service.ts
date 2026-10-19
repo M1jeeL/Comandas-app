@@ -16,10 +16,11 @@ import { UpdateBillTipDto } from './dto/update-bill-tip.dto.js';
 import { BillStatus, OrderStatus } from '../../generated/prisma/enums.js';
 
 import { Prisma } from '../../generated/prisma/client.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class BillsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   /**
    * Verifica que la ubicación pertenezca
@@ -158,10 +159,7 @@ export class BillsService {
       // -------------------------------------------------------
 
       for (const order of orders) {
-        const billableStatuses: OrderStatus[] = [
-          OrderStatus.READY,
-          OrderStatus.DELIVERED,
-        ];
+        const billableStatuses: OrderStatus[] = [OrderStatus.DELIVERED];
 
         if (!billableStatuses.includes(order.status)) {
           throw new ConflictException(
@@ -253,6 +251,12 @@ export class BillsService {
         },
       });
 
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId, userId: user.userId,
+        action: 'BILL_CREATED', entityType: 'Bill', entityId: bill.id,
+        metadata: { orderIds: orders.map((order) => order.id), total: bill.total.toString() },
+      });
+
       return bill;
     });
   }
@@ -286,7 +290,18 @@ export class BillsService {
 
         discounts: true,
 
-        payments: true,
+        payments: {
+          include: {
+            cashHandover: {
+              select: {
+                id: true,
+                status: true,
+                cashSessionId: true,
+                confirmedAt: true,
+              },
+            },
+          },
+        },
       },
 
       orderBy: {
@@ -373,9 +388,19 @@ export class BillsService {
       (payment) => payment.status === 'CONFIRMED',
     );
 
+    const pendingPayment = bill.payments.some(
+      (payment) => payment.status === 'PENDING',
+    );
+
     if (confirmedPayment) {
       throw new ConflictException(
         'No se puede modificar la propina de una cuenta que tiene pagos confirmados',
+      );
+    }
+
+    if (pendingPayment) {
+      throw new ConflictException(
+        'Confirma o cancela los pagos pendientes antes de modificar la propina',
       );
     }
 
@@ -389,18 +414,11 @@ export class BillsService {
       );
     }
 
-    return this.prisma.bill.update({
-      where: {
-        id: bill.id,
-      },
-
-      data: {
-        tipAmount,
-
-        total,
-      },
-
-      include: {
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.bill.update({
+        where: { id: bill.id },
+        data: { tipAmount, total },
+        include: {
         orders: {
           include: {
             order: true,
@@ -410,7 +428,14 @@ export class BillsService {
         discounts: true,
 
         payments: true,
-      },
+        },
+      });
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: bill.locationId, userId: user.userId,
+        action: 'BILL_UPDATED', entityType: 'Bill', entityId: bill.id,
+        metadata: { field: 'tipAmount', from: bill.tipAmount.toString(), to: tipAmount.toString(), total: total.toString() },
+      });
+      return updated;
     });
   }
 
@@ -456,16 +481,11 @@ export class BillsService {
       );
     }
 
-    return this.prisma.bill.update({
-      where: {
-        id: bill.id,
-      },
-
-      data: {
-        status: BillStatus.VOID,
-      },
-
-      include: {
+    return this.prisma.$transaction(async (tx) => {
+      const voided = await tx.bill.update({
+        where: { id: bill.id },
+        data: { status: BillStatus.VOID },
+        include: {
         orders: {
           include: {
             order: true,
@@ -475,7 +495,14 @@ export class BillsService {
         discounts: true,
 
         payments: true,
-      },
+        },
+      });
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: bill.locationId, userId: user.userId,
+        action: 'BILL_CANCELLED', entityType: 'Bill', entityId: bill.id,
+        metadata: { from: bill.status, to: BillStatus.VOID },
+      });
+      return voided;
     });
   }
 }

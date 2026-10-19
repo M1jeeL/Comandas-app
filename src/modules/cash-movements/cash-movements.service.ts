@@ -17,10 +17,11 @@ import {
 } from '../../generated/prisma/enums.js';
 
 import { Prisma } from '../../generated/prisma/client.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class CashMovementsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   /**
    * Verifica que la sesión pertenezca
@@ -124,6 +125,13 @@ export class CashMovementsService {
 
           createdBy: user.userId,
         },
+      });
+
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: session.locationId, userId: user.userId,
+        action: dto.type === CashMovementType.ADJUSTMENT ? 'CASH_ADJUSTMENT' : 'CASH_MOVEMENT_CREATED',
+        entityType: 'CashMovement', entityId: movement.id,
+        metadata: { type: movement.type, amount: movement.amount.toString(), reason: movement.reason, reference: movement.reference },
       });
 
       return movement;

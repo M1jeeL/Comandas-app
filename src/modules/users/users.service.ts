@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -15,10 +16,12 @@ import type { JwtUser } from '../../common/interfaces/jwt-user.interface.js';
 import { Role } from '../../generated/prisma/enums.js';
 
 import * as bcrypt from 'bcrypt';
+import { MembershipStatus } from '../../generated/prisma/enums.js';
+import { AuditService } from '../audit/audit.service.js';
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   /**
    * Campos públicos de User.
@@ -37,14 +40,22 @@ export class UsersService {
   /**
    * Crear un usuario.
    *
-   * El usuario todavía no pertenece al Business.
-   * La Membership se crea posteriormente.
+   * Crea la identidad y su membresía de sucursal en una operación atómica.
    */
   async create(user: JwtUser, dto: CreateUserDto) {
+    this.validateRoleAssignment(user.role, dto.role);
+    const email = dto.email.trim().toLowerCase();
+    if (dto.firstName.trim().length < 2 || dto.lastName.trim().length < 2) {
+      throw new BadRequestException('Nombre y apellido deben tener al menos 2 caracteres');
+    }
+    const location = await this.prisma.location.findFirst({
+      where: { id: dto.locationId, businessId: user.businessId, status: 'ACTIVE' },
+      select: { id: true, name: true },
+    });
+    if (!location) throw new NotFoundException('La sucursal seleccionada no pertenece al negocio o está inactiva');
+
     const existingUser = await this.prisma.user.findUnique({
-      where: {
-        email: dto.email,
-      },
+      where: { email },
     });
 
     if (existingUser) {
@@ -53,16 +64,51 @@ export class UsersService {
 
     const hashedPassword = await bcrypt.hash(dto.password, 12);
 
-    return this.prisma.user.create({
-      data: {
-        email: dto.email,
-        password: hashedPassword,
-        firstName: dto.firstName,
-        lastName: dto.lastName,
-      },
-
-      select: this.publicUserSelect,
+    return this.prisma.$transaction(async (tx) => {
+      const createdUser = await tx.user.create({
+        data: {
+          email,
+          password: hashedPassword,
+          firstName: dto.firstName.trim(),
+          lastName: dto.lastName.trim(),
+        },
+      });
+      const membership = await tx.membership.create({
+        data: {
+          userId: createdUser.id,
+          businessId: user.businessId,
+          locationId: location.id,
+          role: dto.role,
+          status: MembershipStatus.ACTIVE,
+        },
+      });
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: location.id, userId: user.userId,
+        action: 'USER_CREATED', entityType: 'User', entityId: createdUser.id,
+        metadata: { email: createdUser.email },
+      });
+      await this.audit.record(tx, {
+        businessId: user.businessId, locationId: location.id, userId: user.userId,
+        action: 'MEMBERSHIP_CREATED', entityType: 'Membership', entityId: membership.id,
+        metadata: { userId: createdUser.id, role: membership.role, status: membership.status },
+      });
+      return {
+        ...this.publicFields(createdUser),
+        memberships: [{ ...membership, location }],
+      };
     });
+  }
+
+  private publicFields(user: { id: string; email: string; firstName: string; lastName: string; createdAt: Date; updatedAt: Date }) {
+    return { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName, createdAt: user.createdAt, updatedAt: user.updatedAt };
+  }
+
+  private validateRoleAssignment(actorRole: Role, targetRole: Role) {
+    if (actorRole === Role.OWNER) return;
+    if (actorRole === Role.ADMIN && targetRole !== Role.OWNER) return;
+    const operationalRoles: Role[] = [Role.WAITER, Role.KITCHEN, Role.CASHIER];
+    if (actorRole === Role.MANAGER && operationalRoles.includes(targetRole)) return;
+    throw new ForbiddenException('No tienes permisos para asignar este rol');
   }
 
   /**
@@ -75,7 +121,6 @@ export class UsersService {
         memberships: {
           some: {
             businessId: user.businessId,
-            status: 'ACTIVE',
           },
         },
       },
@@ -92,6 +137,8 @@ export class UsersService {
             id: true,
             role: true,
             status: true,
+            locationId: true,
+            location: { select: { id: true, name: true } },
             createdAt: true,
             updatedAt: true,
           },
@@ -132,6 +179,8 @@ export class UsersService {
             id: true,
             role: true,
             status: true,
+            locationId: true,
+            location: { select: { id: true, name: true } },
             createdAt: true,
             updatedAt: true,
           },
@@ -180,11 +229,8 @@ export class UsersService {
      * Un MANAGER no puede modificar
      * usuarios ADMIN u OWNER.
      */
-    if (
-      user.role === Role.MANAGER &&
-      (targetMembership.role === Role.OWNER ||
-        targetMembership.role === Role.ADMIN)
-    ) {
+    const operationalRoles: Role[] = [Role.WAITER, Role.KITCHEN, Role.CASHIER];
+    if (user.role === Role.MANAGER && !operationalRoles.includes(targetMembership.role)) {
       throw new ForbiddenException('No puedes modificar a este usuario');
     }
 
@@ -192,8 +238,22 @@ export class UsersService {
      * No permitimos que un ADMIN modifique
      * al OWNER.
      */
-    if (user.role === Role.ADMIN && targetMembership.role === Role.OWNER) {
-      throw new ForbiddenException('No puedes modificar al OWNER del negocio');
+    const privilegedRoles: Role[] = [Role.OWNER, Role.ADMIN];
+    if (user.role === Role.ADMIN && privilegedRoles.includes(targetMembership.role)) {
+      throw new ForbiddenException('Un ADMIN no puede modificar a otro ADMIN ni al OWNER');
+    }
+    if (targetUser.id === user.userId && (dto.status === MembershipStatus.INACTIVE || (dto.role && dto.role !== targetMembership.role))) {
+      throw new ForbiddenException('No puedes desactivar tu propia cuenta ni cambiar tu propio rol');
+    }
+    if (dto.role !== undefined && dto.role !== targetMembership.role) {
+      this.validateRoleAssignment(user.role, dto.role);
+    }
+    if (dto.locationId !== undefined) {
+      const location = await this.prisma.location.findFirst({
+        where: { id: dto.locationId, businessId: user.businessId, status: 'ACTIVE' },
+        select: { id: true },
+      });
+      if (!location) throw new NotFoundException('La sucursal seleccionada no pertenece al negocio o está inactiva');
     }
 
     const data: {
@@ -204,11 +264,11 @@ export class UsersService {
     } = {};
 
     if (dto.email !== undefined) {
-      if (dto.email !== targetUser.email) {
+      const email = dto.email.trim().toLowerCase();
+      if (!email) throw new BadRequestException('El correo es obligatorio');
+      if (email !== targetUser.email) {
         const existingUser = await this.prisma.user.findUnique({
-          where: {
-            email: dto.email,
-          },
+          where: { email },
         });
 
         if (existingUser) {
@@ -216,15 +276,17 @@ export class UsersService {
         }
       }
 
-      data.email = dto.email;
+      data.email = email;
     }
 
     if (dto.firstName !== undefined) {
-      data.firstName = dto.firstName;
+      if (dto.firstName.trim().length < 2) throw new BadRequestException('El nombre debe tener al menos 2 caracteres');
+      data.firstName = dto.firstName.trim();
     }
 
     if (dto.lastName !== undefined) {
-      data.lastName = dto.lastName;
+      if (dto.lastName.trim().length < 2) throw new BadRequestException('El apellido debe tener al menos 2 caracteres');
+      data.lastName = dto.lastName.trim();
     }
 
     /**
@@ -235,14 +297,42 @@ export class UsersService {
       data.password = await bcrypt.hash(dto.password, 12);
     }
 
-    return this.prisma.user.update({
-      where: {
-        id: targetUser.id,
-      },
-
-      data,
-
-      select: this.publicUserSelect,
+    return this.prisma.$transaction(async (tx) => {
+      const updatedUser = await tx.user.update({ where: { id: targetUser.id }, data });
+      const membershipData = {
+        ...(dto.role !== undefined && { role: dto.role }),
+        ...(dto.locationId !== undefined && { locationId: dto.locationId }),
+        ...(dto.status !== undefined && { status: dto.status }),
+      };
+      const updatedMembership = Object.keys(membershipData).length
+        ? await tx.membership.update({
+            where: { id: targetMembership.id }, data: membershipData,
+            include: { location: { select: { id: true, name: true } } },
+          })
+        : { ...targetMembership, location: await tx.location.findUniqueOrThrow({ where: { id: targetMembership.locationId }, select: { id: true, name: true } }) };
+      if (Object.keys(data).length) {
+        await this.audit.record(tx, {
+          businessId: user.businessId, locationId: targetMembership.locationId, userId: user.userId,
+          action: 'USER_UPDATED', entityType: 'User', entityId: targetUser.id,
+          metadata: { changedFields: Object.keys(data) },
+        });
+      }
+      if (Object.keys(membershipData).length) {
+        await this.audit.record(tx, {
+          businessId: user.businessId, locationId: dto.locationId ?? targetMembership.locationId, userId: user.userId,
+          action: dto.role && dto.role !== targetMembership.role ? 'MEMBERSHIP_ROLE_CHANGED' : 'MEMBERSHIP_UPDATED',
+          entityType: 'Membership', entityId: targetMembership.id,
+          metadata: {
+            ...(dto.role !== undefined && { role: { from: targetMembership.role, to: dto.role } }),
+            ...(dto.locationId !== undefined && { locationId: { from: targetMembership.locationId, to: dto.locationId } }),
+            ...(dto.status !== undefined && { status: { from: targetMembership.status, to: dto.status } }),
+          },
+        });
+      }
+      return {
+        ...this.publicFields(updatedUser),
+        memberships: [{ ...updatedMembership }],
+      };
     });
   }
 

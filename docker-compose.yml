@@ -1,11 +1,11 @@
 services:
   db:
     image: postgres:18
-    container_name: emb-manager-db
+    container_name: mesapro
     environment:
-      POSTGRES_USER: emb_manager
+      POSTGRES_USER: mesapro
       POSTGRES_PASSWORD: supersecretpassword
-      POSTGRES_DB: emb_manager
+      POSTGRES_DB: mesapro
     ports:
       - "5332:5432"
     volumes:

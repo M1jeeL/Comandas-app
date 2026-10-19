@@ -5,4 +5,5 @@ export interface JwtUser {
   businessId: string;
   membershipId: string;
   role: Role;
+  sessionId: string;
 }

@@ -1,4 +1,4 @@
-// This is your Prisma schema file,
+  // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 // Get a free hosted Postgres database in seconds: `npx create-db`
@@ -397,6 +397,7 @@ model User {
   cashMovements         CashMovement[]
   cashHandoversCreated  CashHandover[] @relation("CashHandoverCreatedBy")
   auditLogs             AuditLog[]
+  refreshSessions       RefreshSession[]
 
   @@index([email])
 }
@@ -412,6 +413,7 @@ model Membership {
 
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  refreshSessions RefreshSession[]
 
   @@unique([userId, businessId])
   @@index([businessId, status])
@@ -909,4 +911,26 @@ model AuditLog {
   @@index([locationId, createdAt])
   @@index([entityType, entityId])
   @@index([userId, createdAt])
+}
+
+
+
+model RefreshSession {
+  id           String    @id @default(uuid())
+  familyId     String    @default(uuid())
+  userId       String
+  membershipId String
+  tokenHash    String    @unique
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  user User @relation(fields: [userId],references: [id],onDelete: Cascade)
+
+  membership Membership @relation(fields: [membershipId],references: [id],onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
 }

@@ -14,7 +14,6 @@ import {
 import { OrdersService } from './orders.service.js';
 
 import { CreateOrderDto } from './dto/create-order.dto.js';
-import { UpdateOrderStatusDto } from './dto/update-order-status.dto.js';
 
 import { ScopedJwtAuthGuard } from '../../common/guards/scoped-jwt-auth.guard.js';
 
@@ -90,13 +89,22 @@ export class OrdersController {
     return this.ordersService.requestItemCancellation(user, orderId, itemId, dto);
   }
 
-  @Patch(':id/status')
-  updateStatus(
+  @Post(':id/dispatch')
+  dispatchForPrinting(
     @CurrentUser() user: JwtUser,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateOrderStatusDto,
+    @Query('reprint') reprint?: string,
   ) {
-    return this.ordersService.updateStatus(user, id, dto);
+    return this.ordersService.dispatchForPrinting(user, id, reprint === 'true');
+  }
+
+  @Patch(':orderId/items/:itemId/delivered')
+  markItemDelivered(
+    @CurrentUser() user: JwtUser,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+  ) {
+    return this.ordersService.markItemDelivered(user, orderId, itemId);
   }
 
   @Patch(':id/cancel')

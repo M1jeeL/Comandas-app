@@ -711,7 +711,7 @@ model OrderItem {
   productId               String
   productNameSnapshot     String
   unitPrice               Decimal                @db.Decimal(12, 2)
-  quantity                Int
+  quantity                Decimal                @db.Decimal(12, 3)
   notes                   String?
   status                  OrderItemStatus        @default(PENDING)
   cancellationStatus      ItemCancellationStatus @default(NONE)
@@ -772,7 +772,7 @@ model PreparationTicketItem {
   id          String @id @default(uuid())
   ticketId    String
   orderItemId String
-  quantity    Int
+  quantity    Decimal @db.Decimal(12, 3)
 
   ticket    PreparationTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   orderItem OrderItem         @relation(fields: [orderItemId], references: [id], onDelete: Restrict)

@@ -20,7 +20,6 @@ import { ComboItemsModule } from './modules/combo-items/combo-items.module.js';
 import { RestaurantTablesModule } from './modules/restaurant-tables/restaurant-tables.module.js';
 import { TableSessionsModule } from './modules/table-sessions/table-sessions.module.js';
 import { OrdersModule } from './modules/orders/orders.module.js';
-import { PreparationTicketsModule } from './modules/preparation-tickets/preparation-tickets.module.js';
 import { BillsModule } from './modules/bills/bills.module.js';
 import { DiscountsModule } from './modules/discounts/discounts.module.js';
 import { PaymentsModule } from './modules/payments/payments.module.js';
@@ -55,7 +54,6 @@ import { ScopedJwtAuthGuard } from './common/guards/scoped-jwt-auth.guard.js';
     RestaurantTablesModule,
     TableSessionsModule,
     OrdersModule,
-    PreparationTicketsModule,
     BillsModule,
     DiscountsModule,
     PaymentsModule,

@@ -267,7 +267,7 @@ export class ReportsService {
     const ranked = products
       .map((product) => ({
         productId: product.productId,
-        unitsSold: product._sum.quantity ?? 0,
+        unitsSold: Number(product._sum.quantity ?? 0),
         orderLines: product._count._all,
       }))
       .sort((a, b) => b.unitsSold - a.unitsSold)

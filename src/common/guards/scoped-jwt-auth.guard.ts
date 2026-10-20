@@ -25,6 +25,11 @@ export class ScopedJwtAuthGuard extends JwtAuthGuard {
   }
 
   private authorizeOperation(request: Request & { user: JwtUser }) {
+    if (request.user.role === Role.KITCHEN) {
+      throw new ForbiddenException(
+        'El personal de cocina no tiene acceso operativo al sistema',
+      );
+    }
     const segments = request.originalUrl
       .split('?')[0]
       .split('/')
@@ -44,8 +49,6 @@ export class ScopedJwtAuthGuard extends JwtAuthGuard {
     else if (root === 'audit-logs') allowed = managers;
     else if (root === 'businesses' || root === 'locations') allowed = owners;
     else if (root === 'users' || root === 'memberships') allowed = managers;
-    else if (root === 'preparation-tickets')
-      allowed = [Role.OWNER, Role.ADMIN, Role.MANAGER, Role.KITCHEN];
     else if (
       root === 'cash-sessions' ||
       root === 'cash-movements' ||
@@ -59,9 +62,13 @@ export class ScopedJwtAuthGuard extends JwtAuthGuard {
       allowed =
         method === 'GET' ? [...floor, Role.CASHIER] : [...floor, Role.CASHIER];
     else if (root === 'orders')
-      allowed = role === Role.KITCHEN ? [] : floor.concat(Role.CASHIER);
-    else if (root === 'table-sessions')
-      allowed = method === 'POST' ? floor : floor.concat(Role.CASHIER);
+      allowed = floor.concat(Role.CASHIER);
+    else if (root === 'table-sessions') {
+      if (method === 'POST') allowed = floor;
+      else if (action === 'close') allowed = managers.concat(Role.WAITER);
+      else if (action === 'transfer') allowed = managers;
+      else allowed = floor.concat(Role.CASHIER);
+    }
     else if (root === 'restaurant-tables')
       allowed = method === 'GET' ? operationalReaders : managers;
     else if (
@@ -78,34 +85,19 @@ export class ScopedJwtAuthGuard extends JwtAuthGuard {
     )
       allowed = method === 'GET' ? operationalReaders : managers;
 
-    // Kitchen screens need the local workstation list to filter preparation tickets.
-    if (root === 'workstations' && method === 'GET') {
-      allowed = [...operationalReaders, Role.KITCHEN];
-    }
-
     if (allowed && !allowed.includes(role)) {
       throw new ForbiddenException(
         'Tu rol no tiene permiso para esta operación',
       );
     }
 
-    // Preparation staff may only change ticket state; they cannot use other write actions.
-    if (
-      role === Role.KITCHEN &&
-      root === 'preparation-tickets' &&
-      method !== 'GET' &&
-      action !== 'status'
-    ) {
-      throw new ForbiddenException(
-        'Cocina solo puede actualizar el estado de las comandas',
-      );
-    }
     // Waiters can request/create bills but cannot void bills or manage discounts.
     if (
       role === Role.WAITER &&
       root === 'bills' &&
       method !== 'GET' &&
-      action !== 'bills'
+      action !== 'bills' &&
+      action !== 'tip'
     ) {
       throw new ForbiddenException(
         'No tienes permiso para anular cuentas o administrar descuentos',
@@ -118,7 +110,7 @@ export class ScopedJwtAuthGuard extends JwtAuthGuard {
       'reports', 'audit-logs', 'users', 'memberships', 'businesses', 'locations',
       'products', 'categories', 'combos', 'combo-items', 'modifier-groups',
       'modifiers', 'product-workstations', 'workstations', 'restaurant-tables',
-      'table-sessions', 'orders', 'preparation-tickets', 'bills', 'discounts',
+      'table-sessions', 'orders', 'bills', 'discounts',
       'payments', 'cash-sessions', 'cash-movements', 'cash-handovers',
     ];
     const firstIndex = segments.findIndex((segment) => roots.includes(segment));

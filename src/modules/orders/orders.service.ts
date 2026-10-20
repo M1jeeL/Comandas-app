@@ -9,7 +9,6 @@ import {
 import { PrismaService } from '../../prisma.service.js';
 
 import { CreateOrderDto } from './dto/create-order.dto.js';
-import { UpdateOrderStatusDto } from './dto/update-order-status.dto.js';
 import { AddOrderItemDto } from './dto/add-order-item.dto.js';
 import {
   OrderItemStatus,
@@ -139,174 +138,175 @@ export class OrdersService {
     }
   }
 
-  private async createPreparationTickets(
-    tx: Prisma.TransactionClient,
-    orderId: string,
-  ) {
-    const order = await tx.order.findUnique({
-      where: { id: orderId },
-      select: { locationId: true },
-    });
-    if (!order) throw new NotFoundException('Pedido no encontrado');
-    // 1. Obtener los OrderItems activos de la orden.
-    const orderItems = await tx.orderItem.findMany({
-      where: {
-        orderId,
-        status: {
-          not: OrderItemStatus.CANCELLED,
-        },
-      },
-    });
-
-    // No tiene sentido enviar una orden sin items activos.
-    if (orderItems.length === 0) {
-      throw new ConflictException(
-        'No se puede enviar una orden sin items activos',
-      );
+  private assertWaiterOwnsOrder(user: JwtUser, waiterId: string | null) {
+    if (user.role === Role.WAITER && waiterId !== user.userId) {
+      throw new ForbiddenException('Solo el mesero asignado puede operar este pedido');
     }
-
-    // 2. Obtener todos los productos utilizados en la orden.
-    const productIds = [...new Set(orderItems.map((item) => item.productId))];
-
-    const products = await tx.product.findMany({
-      where: {
-        id: {
-          in: productIds,
-        },
-        status: 'ACTIVE',
-      },
-
-      include: {
-        productWorkstations: {
-          include: {
-            workstation: true,
-          },
-        },
-      },
-    });
-
-    // 3. Crear un Map para acceder rápidamente
-    //    al producto mediante productId.
-    const productsMap = new Map(
-      products.map((product) => [product.id, product]),
-    );
-
-    // 4. Validar que todos los productos existan
-    //    y tengan al menos una workstation.
-    for (const orderItem of orderItems) {
-      const product = productsMap.get(orderItem.productId);
-
-      if (!product) {
-        throw new ConflictException(
-          `El producto ${orderItem.productId} no existe o no está activo`,
-        );
-      }
-
-      if (product.productWorkstations.length === 0) {
-        throw new ConflictException(
-          `El producto "${product.name}" no tiene una workstation configurada`,
-        );
-      }
-      if (product.productWorkstations.length !== 1) {
-        throw new ConflictException(
-          `El producto "${product.name}" tiene más de una estación. Corrige su asignación antes de enviar el pedido`,
-        );
-      }
-      if (
-        product.productWorkstations[0].workstation.locationId !==
-        order.locationId
-      ) {
-        throw new ConflictException(
-          `La estación del producto "${product.name}" pertenece a otro local`,
-        );
-      }
+    if (
+      user.role !== Role.OWNER &&
+      user.role !== Role.ADMIN &&
+      user.role !== Role.MANAGER &&
+      user.role !== Role.WAITER
+    ) {
+      throw new ForbiddenException('Tu rol no puede operar pedidos de mesa');
     }
+  }
 
-    // 5. Agrupar los OrderItems por workstation.
-    const workstationItems = new Map<
-      string,
-      {
-        workstationId: string;
-        items: {
-          orderItemId: string;
-          quantity: number;
-        }[];
-      }
-    >();
-
-    for (const orderItem of orderItems) {
-      const product = productsMap.get(orderItem.productId)!;
-
-      const productWorkstation = product.productWorkstations[0];
-      if (productWorkstation.workstation.status !== 'ACTIVE') {
-        throw new ConflictException(
-          `La estación del producto "${product.name}" está inactiva`,
-        );
-      }
-      const workstationId = productWorkstation.workstationId;
-
-      if (!workstationItems.has(workstationId)) {
-        workstationItems.set(workstationId, {
-          workstationId,
-          items: [],
-        });
-      }
-
-      workstationItems.get(workstationId)!.items.push({
-        orderItemId: orderItem.id,
-        quantity: orderItem.quantity,
-      });
-    }
-
-    // 6. Crear un ticket por workstation.
-    const tickets: Prisma.PreparationTicketGetPayload<{
-      include: {
-        workstation: true;
-        items: {
-          include: {
-            orderItem: {
-              include: {
-                product: true;
-                modifiers: true;
-              };
-            };
-          };
-        };
-      };
-    }>[] = [];
-
-    for (const { workstationId, items } of workstationItems.values()) {
-      const ticket = await tx.preparationTicket.create({
-        data: {
-          orderId,
-          workstationId,
-          status: PreparationTicketStatus.PENDING,
-
-          items: {
-            create: items,
-          },
-        },
-
+  async dispatchForPrinting(user: JwtUser, orderId: string, reprint = false) {
+    return serializableTransaction(this.prisma, async (tx) => {
+      const order = await tx.order.findFirst({
+        where: { id: orderId, location: { businessId: user.businessId } },
         include: {
-          workstation: true,
+          waiter: { select: { firstName: true, lastName: true } },
+          tableSession: { include: { table: { select: { name: true } } } },
+          billOrders: { select: { billId: true } },
+        },
+      });
+      if (!order) throw new NotFoundException('Pedido no encontrado');
+      this.assertWaiterOwnsOrder(user, order.waiterId);
+      if (order.billOrders.length > 0 || ['CLOSED', 'CANCELLED'].includes(order.status)) {
+        throw new ConflictException('El pedido ya no admite nuevos envíos a cocina');
+      }
 
-          items: {
+      const pendingItems = await tx.orderItem.findMany({
+        where: {
+          orderId,
+          status: reprint ? OrderItemStatus.SENT : OrderItemStatus.PENDING,
+          cancellationStatus: { notIn: ['PENDING', 'APPROVED'] },
+        },
+        include: {
+          modifiers: true,
+          product: {
             include: {
-              orderItem: {
-                include: {
-                  product: true,
-                  modifiers: true,
-                },
-              },
+              productWorkstations: { include: { workstation: true } },
             },
           },
         },
       });
+      if (pendingItems.length === 0) {
+        throw new ConflictException(
+          reprint ? 'No hay productos pendientes de entrega para reimprimir' : 'No hay productos nuevos para imprimir',
+        );
+      }
 
-      tickets.push(ticket);
-    }
+      const grouped = new Map<string, {
+        workstationId: string;
+        workstationName: string;
+        items: Array<{
+          id: string;
+          productName: string;
+          quantity: string;
+          notes: string | null;
+          modifiers: string[];
+        }>;
+      }>();
+      for (const item of pendingItems) {
+        const assignment = item.product.productWorkstations[0];
+        if (
+          item.product.productWorkstations.length !== 1 ||
+          !assignment ||
+          assignment.workstation.locationId !== order.locationId ||
+          assignment.workstation.status !== 'ACTIVE'
+        ) {
+          throw new ConflictException(
+            `El producto «${item.productNameSnapshot}» no tiene una estación activa válida`,
+          );
+        }
+        if (!grouped.has(assignment.workstationId)) {
+          grouped.set(assignment.workstationId, {
+            workstationId: assignment.workstationId,
+            workstationName: assignment.workstation.name,
+            items: [],
+          });
+        }
+        grouped.get(assignment.workstationId)!.items.push({
+          id: item.id,
+          productName: item.productNameSnapshot,
+          quantity: item.quantity.toString(),
+          notes: item.notes,
+          modifiers: item.modifiers.map((modifier) => modifier.nameSnapshot),
+        });
+      }
 
-    return tickets;
+      if (!reprint) {
+        const changed = await tx.orderItem.updateMany({
+          where: { id: { in: pendingItems.map((item) => item.id) }, status: OrderItemStatus.PENDING },
+          data: { status: OrderItemStatus.SENT },
+        });
+        if (changed.count !== pendingItems.length) {
+          throw new ConflictException('Los productos cambiaron; actualiza el pedido e inténtalo nuevamente');
+        }
+        await tx.order.update({ where: { id: orderId }, data: { status: OrderStatus.SENT } });
+      }
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: order.locationId,
+        userId: user.userId,
+        action: 'ORDER_SENT',
+        entityType: 'Order',
+        entityId: order.id,
+        metadata: {
+          source: reprint ? 'PAPER_REPRINT' : 'PAPER_PRINT',
+          itemIds: pendingItems.map((item) => item.id),
+          itemCount: pendingItems.length,
+          stations: [...grouped.values()].map((station) => station.workstationName),
+        },
+      });
+
+      return {
+        orderCode: order.id.slice(-6).toUpperCase(),
+        tableName: order.tableSession?.table.name ?? order.customerName ?? 'Para llevar',
+        waiterName: order.waiter ? `${order.waiter.firstName} ${order.waiter.lastName}` : '',
+        createdAt: new Date().toISOString(),
+        stations: [...grouped.values()],
+      };
+    });
+  }
+
+  async markItemDelivered(user: JwtUser, orderId: string, itemId: string) {
+    return serializableTransaction(this.prisma, async (tx) => {
+      const order = await tx.order.findFirst({
+        where: { id: orderId, location: { businessId: user.businessId } },
+        include: { billOrders: { select: { billId: true } } },
+      });
+      if (!order) throw new NotFoundException('Pedido no encontrado');
+      this.assertWaiterOwnsOrder(user, order.waiterId);
+      if (order.billOrders.length > 0 || ['CLOSED', 'CANCELLED'].includes(order.status)) {
+        throw new ConflictException('El pedido ya está cerrado para cambios');
+      }
+      const item = await tx.orderItem.findFirst({
+        where: { id: itemId, orderId, status: OrderItemStatus.SENT },
+      });
+      if (!item) throw new ConflictException('El producto no está pendiente de entrega');
+      const updatedItem = await tx.orderItem.updateMany({
+        where: { id: itemId, status: OrderItemStatus.SENT },
+        data: { status: OrderItemStatus.DELIVERED },
+      });
+      if (updatedItem.count !== 1) throw new ConflictException('El producto cambió; actualiza el pedido');
+
+      const remaining = await tx.orderItem.findMany({
+        where: { orderId, status: { not: OrderItemStatus.CANCELLED } },
+        select: { status: true },
+      });
+      const hasUndispatched = remaining.some((candidate) => candidate.status === OrderItemStatus.PENDING);
+      const hasSent = remaining.some((candidate) => candidate.status === OrderItemStatus.SENT);
+      const nextOrderStatus = hasSent
+        ? OrderStatus.SENT
+        : hasUndispatched
+          ? OrderStatus.DRAFT
+          : OrderStatus.DELIVERED;
+      await tx.order.update({ where: { id: orderId }, data: { status: nextOrderStatus } });
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: order.locationId,
+        userId: user.userId,
+        action: 'ORDER_ITEM_UPDATED',
+        entityType: 'OrderItem',
+        entityId: itemId,
+        metadata: { orderId, event: 'ITEM_DELIVERED', from: 'SENT', to: 'DELIVERED' },
+      });
+      return { itemId, orderStatus: nextOrderStatus };
+    });
   }
 
   async addItem(user: JwtUser, orderId: string, dto: AddOrderItemDto) {
@@ -325,11 +325,24 @@ export class OrdersService {
       throw new NotFoundException('Pedido no encontrado');
     }
 
-    // 2. Solo podemos modificar pedidos DRAFT.
-    if (order.status !== OrderStatus.DRAFT) {
+    if (order.status === OrderStatus.CLOSED || order.status === OrderStatus.CANCELLED) {
       throw new ConflictException(
-        'Solo se pueden modificar pedidos en estado DRAFT',
+        'No se pueden agregar productos a un pedido cerrado o cancelado',
       );
+    }
+    this.assertWaiterOwnsOrder(user, order.waiterId);
+    if (order.type !== OrderType.DINE_IN && order.status !== OrderStatus.DRAFT) {
+      throw new ConflictException('Solo se pueden agregar productos a un pedido para llevar en borrador');
+    }
+    if (order.tableSessionId) {
+      const session = await this.prisma.tableSession.findFirst({
+        where: { id: order.tableSessionId, status: 'OPEN' },
+      });
+      if (!session) throw new ConflictException('La sesión de mesa ya no está abierta');
+      const existingBill = await this.prisma.billOrder.findFirst({
+        where: { orderId: order.id },
+      });
+      if (existingBill) throw new ConflictException('La cuenta ya fue solicitada; no se pueden agregar más productos');
     }
 
     // 3. Buscar el producto dentro de la misma ubicación.
@@ -371,7 +384,16 @@ export class OrdersService {
 
     // 6. Crear OrderItem + snapshots de modifiers
     //    dentro de una transacción.
-    return this.prisma.$transaction(async (tx) => {
+    return serializableTransaction(this.prisma, async (tx) => {
+      if (order.tableSessionId) {
+        await tx.$queryRaw`SELECT "id" FROM "TableSession" WHERE "id" = ${order.tableSessionId} FOR UPDATE`;
+        const activeSession = await tx.tableSession.findFirst({
+          where: { id: order.tableSessionId, status: 'OPEN' },
+        });
+        if (!activeSession) throw new ConflictException('La sesión de mesa ya no está abierta');
+        const existingBill = await tx.billOrder.findFirst({ where: { orderId: order.id } });
+        if (existingBill) throw new ConflictException('La cuenta ya fue solicitada; no se pueden agregar más productos');
+      }
       const orderItem = await tx.orderItem.create({
         data: {
           orderId: order.id,
@@ -403,6 +425,25 @@ export class OrdersService {
         },
       });
 
+      const dispatchedItems = await tx.orderItem.count({
+        where: { orderId: order.id, status: OrderItemStatus.SENT },
+      });
+      if (order.status === OrderStatus.DELIVERED) {
+        await tx.order.update({
+          where: { id: order.id },
+          data: { status: dispatchedItems > 0 ? OrderStatus.SENT : OrderStatus.DRAFT },
+        });
+      }
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: order.locationId,
+        userId: user.userId,
+        action: 'ORDER_ITEM_ADDED',
+        entityType: 'OrderItem',
+        entityId: orderItem.id,
+        metadata: { orderId: order.id, productId: product.id, quantity: dto.quantity },
+      });
+
       return orderItem;
     });
   }
@@ -426,135 +467,15 @@ export class OrdersService {
       throw new NotFoundException('Pedido no encontrado');
     }
 
-    if (order.status !== OrderStatus.DRAFT) {
-      if (
-        (order.status !== OrderStatus.SENT &&
-          order.status !== OrderStatus.IN_PROGRESS) ||
-        dto.notes === undefined ||
-        dto.quantity !== undefined ||
-        dto.modifierIds !== undefined
-      ) {
-        throw new ConflictException(
-          'Después del envío solo se puede actualizar la nota del ítem, y la estación debe seguir trabajando en la comanda',
-        );
-      }
-      if (user.role === Role.WAITER && order.waiterId !== user.userId) {
-        throw new ForbiddenException(
-          'Solo el mesero asignado puede modificar este pedido',
-        );
-      }
-      if (
-        user.role !== Role.WAITER &&
-        user.role !== Role.OWNER &&
-        user.role !== Role.ADMIN &&
-        user.role !== Role.MANAGER
-      ) {
-        throw new ForbiddenException(
-          'Tu rol no puede modificar ítems enviados a preparación',
-        );
-      }
-      const item = await this.prisma.orderItem.findFirst({
-        where: { id: itemId, orderId: order.id },
-      });
-      if (!item)
-        throw new NotFoundException('Item no encontrado en este pedido');
-      const ticketItem = await this.prisma.preparationTicketItem.findFirst({
-        where: { orderItemId: item.id, ticket: { orderId: order.id } },
-        include: { ticket: true },
-      });
-      if (
-        !ticketItem ||
-        ticketItem.ticket.status === PreparationTicketStatus.READY ||
-        ticketItem.ticket.status === PreparationTicketStatus.CANCELLED
-      ) {
-        throw new ConflictException(
-          'La estación ya terminó o canceló la preparación de este ítem',
-        );
-      }
-      if (
-        item.cancellationStatus === 'PENDING' ||
-        item.status === OrderItemStatus.CANCELLED
-      ) {
-        throw new ConflictException(
-          'No se puede modificar un ítem con cancelación pendiente o aprobada',
-        );
-      }
-      return serializableTransaction(this.prisma, async (tx) => {
-        const currentOrder = await tx.order.findFirst({
-          where: {
-            id: order.id,
-            status: { in: [OrderStatus.SENT, OrderStatus.IN_PROGRESS] },
-          },
-        });
-        const currentItem = await tx.orderItem.findUnique({
-          where: { id: item.id },
-        });
-        const currentTicketItem = await tx.preparationTicketItem.findFirst({
-          where: {
-            orderItemId: item.id,
-            ticket: {
-              orderId: order.id,
-              status: {
-                notIn: [
-                  PreparationTicketStatus.READY,
-                  PreparationTicketStatus.CANCELLED,
-                ],
-              },
-            },
-          },
-        });
-        if (
-          !currentOrder ||
-          !currentItem ||
-          !currentTicketItem ||
-          currentItem.cancellationStatus === 'PENDING' ||
-          currentItem.status === OrderItemStatus.CANCELLED
-        ) {
-          throw new ConflictException(
-            'El ítem o su comanda cambiaron; actualiza y vuelve a intentar',
-          );
-        }
-        const changed = await tx.orderItem.updateMany({
-          where: { id: item.id, updatedAt: currentItem.updatedAt },
-          data: { notes: dto.notes!.trim() || null },
-        });
-        if (changed.count !== 1)
-          throw new ConflictException('El ítem cambió mientras se actualizaba');
-        const updated = await tx.orderItem.findUniqueOrThrow({
-          where: { id: item.id },
-          include: { modifiers: true, product: true },
-        });
-        await this.audit.record(tx, {
-          businessId: user.businessId,
-          locationId: order.locationId,
-          userId: user.userId,
-          action: 'ORDER_ITEM_UPDATED',
-          entityType: 'OrderItem',
-          entityId: item.id,
-          metadata: {
-            orderId: order.id,
-            field: 'notes',
-            before: currentItem.notes,
-            after: updated.notes,
-            source: 'POST_SEND_AMENDMENT_VISIBLE_TO_PREPARATION',
-          },
-        });
-        return updated;
-      });
-    }
-
     const item = await this.prisma.orderItem.findFirst({
-      where: {
-        id: itemId,
-        orderId: order.id,
-      },
+      where: { id: itemId, orderId: order.id },
     });
+    if (!item) throw new NotFoundException('Item no encontrado en este pedido');
 
-    if (!item) {
-      throw new NotFoundException('Item no encontrado en este pedido');
-    }
-    if (item.status === OrderItemStatus.CANCELLED) {
-      throw new ConflictException('No se puede editar un ítem cancelado');
+    if (item.status !== OrderItemStatus.PENDING || ['CLOSED', 'CANCELLED'].includes(order.status)) {
+      throw new ConflictException(
+        'Solo se pueden editar productos pendientes de impresión en un pedido abierto',
+      );
     }
 
     if (!item.productId) {
@@ -684,12 +605,6 @@ export class OrdersService {
       throw new NotFoundException('Pedido no encontrado');
     }
 
-    if (order.status !== OrderStatus.DRAFT) {
-      throw new ConflictException(
-        'Solo se pueden eliminar items de pedidos en estado DRAFT',
-      );
-    }
-
     const item = await this.prisma.orderItem.findFirst({
       where: {
         id: itemId,
@@ -699,6 +614,18 @@ export class OrdersService {
 
     if (!item) {
       throw new NotFoundException('Item no encontrado en este pedido');
+    }
+    if (
+      item.status !== OrderItemStatus.PENDING ||
+      ['CLOSED', 'CANCELLED'].includes(order.status)
+    ) {
+      throw new ConflictException(
+        'Solo se pueden quitar productos que aún no se hayan impreso',
+      );
+    }
+    this.assertWaiterOwnsOrder(user, order.waiterId);
+    if (await this.prisma.billOrder.findFirst({ where: { orderId: order.id } })) {
+      throw new ConflictException('La cuenta ya fue solicitada; no se pueden quitar productos');
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -732,32 +659,14 @@ export class OrdersService {
   ) {
     return serializableTransaction(this.prisma, async (tx) => {
       const order = await tx.order.findFirst({
-        where: { id: orderId, location: { businessId: user.businessId } },
+        where: {
+          id: orderId,
+          location: { businessId: user.businessId },
+          billOrders: { none: {} },
+        },
       });
       if (!order) throw new NotFoundException('Pedido no encontrado');
-      if (
-        order.status !== OrderStatus.SENT &&
-        order.status !== OrderStatus.IN_PROGRESS
-      ) {
-        throw new ConflictException(
-          'Solo se puede solicitar cancelación mientras la preparación sigue activa',
-        );
-      }
-      if (user.role === Role.WAITER && order.waiterId !== user.userId) {
-        throw new ForbiddenException(
-          'Solo el mesero asignado puede solicitar la cancelación',
-        );
-      }
-      if (
-        user.role !== Role.WAITER &&
-        user.role !== Role.OWNER &&
-        user.role !== Role.ADMIN &&
-        user.role !== Role.MANAGER
-      ) {
-        throw new ForbiddenException(
-          'Tu rol no puede solicitar la cancelación de ítems',
-        );
-      }
+      this.assertWaiterOwnsOrder(user, order.waiterId);
       const item = await tx.orderItem.findFirst({
         where: { id: itemId, orderId },
       });
@@ -765,62 +674,51 @@ export class OrdersService {
         throw new NotFoundException('Ítem no encontrado en este pedido');
       if (item.status === OrderItemStatus.CANCELLED)
         throw new ConflictException('El ítem ya está cancelado');
-      if (item.cancellationStatus === 'PENDING')
-        throw new ConflictException(
-          'El ítem ya tiene una cancelación pendiente',
-        );
-      if (item.cancellationStatus === 'APPROVED')
-        throw new ConflictException('La cancelación ya fue aprobada');
-      const ticketItem = await tx.preparationTicketItem.findFirst({
-        where: { orderItemId: item.id, ticket: { orderId } },
-        include: { ticket: true },
-      });
-      if (
-        !ticketItem ||
-        ticketItem.ticket.status === PreparationTicketStatus.READY ||
-        ticketItem.ticket.status === PreparationTicketStatus.CANCELLED
-      ) {
-        throw new ConflictException(
-          'La estación ya terminó o canceló este ítem; no se puede solicitar su cancelación',
-        );
+      if (item.status === OrderItemStatus.DELIVERED) {
+        throw new ConflictException('No se puede cancelar un producto que ya fue entregado');
       }
-      const requestedAt = new Date();
-      const changed = await tx.orderItem.updateMany({
-        where: {
-          id: item.id,
-          cancellationStatus: item.cancellationStatus,
-          status: item.status,
-        },
-        data: {
-          cancellationStatus: 'PENDING',
-          cancellationReason: dto.reason.trim(),
-          cancellationRequestedAt: requestedAt,
-          cancellationRequestedBy: user.userId,
-          cancellationResolvedAt: null,
-          cancellationResolvedBy: null,
-        },
-      });
-      if (changed.count !== 1)
-        throw new ConflictException(
-          'El ítem cambió mientras se solicitaba la cancelación',
-        );
-      const updated = await tx.orderItem.findUniqueOrThrow({
+      const now = new Date();
+      const updated = await tx.orderItem.update({
         where: { id: item.id },
+        data: {
+          status: OrderItemStatus.CANCELLED,
+          cancellationStatus: 'APPROVED',
+          cancellationReason: dto.reason.trim(),
+          cancellationRequestedAt: now,
+          cancellationRequestedBy: user.userId,
+          cancellationResolvedAt: now,
+          cancellationResolvedBy: user.userId,
+        },
         include: { modifiers: true },
       });
+      const remaining = await tx.orderItem.findMany({
+        where: { orderId, status: { not: OrderItemStatus.CANCELLED } },
+        select: { status: true },
+      });
+      const hasPending = remaining.some(({ status }) => status === OrderItemStatus.PENDING);
+      const hasSent = remaining.some(({ status }) => status === OrderItemStatus.SENT);
+      const nextStatus = remaining.length === 0
+        ? OrderStatus.CANCELLED
+        : hasSent
+          ? OrderStatus.SENT
+          : hasPending
+            ? OrderStatus.DRAFT
+            : OrderStatus.DELIVERED;
+      await tx.order.update({ where: { id: orderId }, data: { status: nextStatus } });
       await this.audit.record(tx, {
         businessId: user.businessId,
         locationId: order.locationId,
         userId: user.userId,
-        action: 'ORDER_ITEM_UPDATED',
+        action: 'ORDER_ITEM_CANCELLED',
         entityType: 'OrderItem',
         entityId: item.id,
         metadata: {
           orderId,
-          event: 'CANCELLATION_REQUESTED',
+          event: 'CANCELLED_BY_WAITER',
           reason: dto.reason.trim(),
           quantity: item.quantity,
-          workstationId: ticketItem.ticket.workstationId,
+          previousStatus: item.status,
+          orderStatus: nextStatus,
         },
       });
       return updated;
@@ -881,13 +779,6 @@ export class OrdersService {
     }
 
     // --------------------------------------------------
-    // 4. TAKEAWAY requiere nombre del cliente
-    // --------------------------------------------------
-
-    if (dto.type === OrderType.TAKEAWAY && !dto.customerName?.trim()) {
-      throw new BadRequestException('Un pedido TAKEAWAY requiere customerName');
-    }
-
     // --------------------------------------------------
     // 5. Validar waiterId
     // --------------------------------------------------
@@ -926,7 +817,28 @@ export class OrdersService {
     // 7. Crear Order
     // --------------------------------------------------
 
-    return this.prisma.$transaction(async (tx) => {
+    return serializableTransaction(this.prisma, async (tx) => {
+      if (tableSession) {
+        await tx.$queryRaw`SELECT "id" FROM "TableSession" WHERE "id" = ${tableSession.id} FOR UPDATE`;
+        const activeSession = await tx.tableSession.findFirst({
+          where: { id: tableSession.id, status: 'OPEN' },
+        });
+        if (!activeSession) throw new ConflictException('La sesión de mesa ya no está abierta');
+        const existingOrder = await tx.order.findFirst({
+          where: {
+            tableSessionId: activeSession.id,
+            status: { notIn: [OrderStatus.CLOSED, OrderStatus.CANCELLED] },
+          },
+          orderBy: { updatedAt: 'desc' },
+          include: { billOrders: true },
+        });
+        if (existingOrder) {
+          if (existingOrder.billOrders.length > 0) {
+            throw new ConflictException('Esta sesión ya tiene una cuenta solicitada; primero completa el cobro y cierra la mesa');
+          }
+          return existingOrder;
+        }
+      }
       const order = await tx.order.create({
         data: {
           locationId: dto.locationId,
@@ -974,6 +886,7 @@ export class OrdersService {
     return this.prisma.order.findMany({
       where: {
         locationId,
+        ...(user.role === Role.WAITER ? { waiterId: user.userId } : {}),
       },
       include: {
         tableSession: {
@@ -998,7 +911,7 @@ export class OrdersService {
           },
         },
 
-        items: true,
+        items: { include: { modifiers: true } },
         billOrders: {
           include: {
             bill: {
@@ -1094,112 +1007,13 @@ export class OrdersService {
       throw new NotFoundException('Pedido no encontrado');
     }
 
+    if (user.role === Role.WAITER && order.waiterId !== user.userId) {
+      throw new ForbiddenException('Solo puedes consultar pedidos de mesas asignadas a ti');
+    }
+
     return order;
   }
 
-  /**
-   * Cambiar estado del pedido.
-   */
-  async updateStatus(user: JwtUser, id: string, dto: UpdateOrderStatusDto) {
-    if (
-      dto.status !== OrderStatus.SENT &&
-      dto.status !== OrderStatus.DELIVERED
-    ) {
-      throw new BadRequestException(
-        'El pedido solo puede enviarse a preparación o marcarse como entregado desde esta acción',
-      );
-    }
-
-    return serializableTransaction(this.prisma, async (tx) => {
-      const order = await tx.order.findFirst({
-        where: { id, location: { businessId: user.businessId } },
-      });
-      if (!order) throw new NotFoundException('Pedido no encontrado');
-
-      const expectedStatus =
-        dto.status === OrderStatus.SENT ? OrderStatus.DRAFT : OrderStatus.READY;
-      if (order.status !== expectedStatus) {
-        throw new ConflictException(
-          dto.status === OrderStatus.DELIVERED
-            ? 'El pedido solo puede entregarse cuando preparación lo haya marcado como listo'
-            : `Solo se pueden enviar pedidos en estado ${OrderStatus.DRAFT}`,
-        );
-      }
-      if (user.role === Role.WAITER && order.waiterId !== user.userId) {
-        throw new ForbiddenException(
-          'Solo el mesero asignado puede operar este pedido',
-        );
-      }
-
-      if (dto.status === OrderStatus.DELIVERED) {
-        const activeItems = await tx.orderItem.count({
-          where: {
-            orderId: order.id,
-            status: { not: OrderItemStatus.CANCELLED },
-          },
-        });
-        if (activeItems === 0) {
-          throw new ConflictException(
-            'No se puede entregar un pedido sin ítems activos; cancela el pedido completo',
-          );
-        }
-        const tickets = await tx.preparationTicket.findMany({
-          where: { orderId: order.id },
-          select: {
-            status: true,
-            items: { select: { orderItem: { select: { status: true } } } },
-          },
-        });
-        if (
-          tickets.length === 0 ||
-          tickets.some(
-            (ticket) =>
-              ticket.status !== PreparationTicketStatus.READY &&
-              !(
-                ticket.status === PreparationTicketStatus.CANCELLED &&
-                ticket.items.every(
-                  ({ orderItem }) =>
-                    orderItem.status === OrderItemStatus.CANCELLED,
-                )
-              ),
-          )
-        ) {
-          throw new ConflictException(
-            'No se puede entregar un pedido con comandas pendientes',
-          );
-        }
-      }
-
-      const changed = await tx.order.updateMany({
-        where: { id: order.id, status: expectedStatus },
-        data: { status: dto.status },
-      });
-      if (changed.count !== 1) {
-        throw new ConflictException(
-          'El estado del pedido cambió por otra solicitud',
-        );
-      }
-
-      const preparationTickets =
-        dto.status === OrderStatus.SENT
-          ? await this.createPreparationTickets(tx, order.id)
-          : [];
-      const updatedOrder = await tx.order.findUniqueOrThrow({
-        where: { id: order.id },
-      });
-      await this.audit.record(tx, {
-        businessId: user.businessId,
-        locationId: order.locationId,
-        userId: user.userId,
-        action:
-          dto.status === OrderStatus.SENT ? 'ORDER_SENT' : 'ORDER_DELIVERED',
-        entityType: 'Order',
-        entityId: order.id,
-        metadata: { from: order.status, to: dto.status },
-      });
-      return { order: updatedOrder, preparationTickets };
-    });
-  }
   /**
    * Cancelar pedido.
    */
@@ -1215,6 +1029,17 @@ export class OrdersService {
           'Solo el mesero asignado puede operar este pedido',
         );
       }
+      const itemsAlreadyDispatched = await tx.orderItem.count({
+        where: {
+          orderId: order.id,
+          status: { in: [OrderItemStatus.SENT, OrderItemStatus.DELIVERED] },
+        },
+      });
+      if (itemsAlreadyDispatched > 0) {
+        throw new ConflictException(
+          'Cancela individualmente los productos ya impresos; no se puede cancelar el pedido completo',
+        );
+      }
       const changed = await tx.order.updateMany({
         where: { id: order.id, status: order.status },
         data: { status: OrderStatus.CANCELLED },
@@ -1224,6 +1049,10 @@ export class OrdersService {
           'El estado del pedido cambió por otra solicitud',
         );
       }
+      await tx.orderItem.updateMany({
+        where: { orderId: order.id, status: OrderItemStatus.PENDING },
+        data: { status: OrderItemStatus.CANCELLED },
+      });
       const activeTickets = await tx.preparationTicket.findMany({
         where: {
           orderId: order.id,

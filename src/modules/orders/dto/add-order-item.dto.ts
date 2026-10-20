@@ -1,11 +1,12 @@
 import {
   ArrayUnique,
   IsArray,
-  IsInt,
+  IsNumber,
   IsNotEmpty,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   Min,
 } from 'class-validator';
 
@@ -14,8 +15,9 @@ export class AddOrderItemDto {
   @IsNotEmpty()
   productId: string;
 
-  @IsInt()
-  @Min(1)
+  @IsNumber({ maxDecimalPlaces: 3 })
+  @Min(0.001)
+  @Max(999_999_999)
   quantity: number;
 
   @IsString()

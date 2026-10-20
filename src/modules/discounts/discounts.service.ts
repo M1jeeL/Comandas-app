@@ -127,6 +127,17 @@ export class DiscountsService {
     throw new BadRequestException('Tipo de descuento no válido');
   }
 
+  private updateSuggestedTip(
+    subtotal: Prisma.Decimal,
+    oldDiscountTotal: Prisma.Decimal,
+    newDiscountTotal: Prisma.Decimal,
+    currentTip: Prisma.Decimal,
+  ) {
+    const oldSuggested = subtotal.sub(oldDiscountTotal).mul(0.1).toDecimalPlaces(0);
+    if (!currentTip.equals(oldSuggested)) return currentTip;
+    return subtotal.sub(newDiscountTotal).mul(0.1).toDecimalPlaces(0);
+  }
+
   /**
    * Crear descuento.
    */
@@ -182,7 +193,13 @@ export class DiscountsService {
 
       const newDiscountTotal = currentDiscountTotal.add(amount);
 
-      const newTotal = subtotal.sub(newDiscountTotal).add(bill.tipAmount);
+      const tipAmount = this.updateSuggestedTip(
+        subtotal,
+        currentDiscountTotal,
+        newDiscountTotal,
+        bill.tipAmount,
+      );
+      const newTotal = subtotal.sub(newDiscountTotal).add(tipAmount);
 
       if (newTotal.lessThan(0)) {
         throw new BadRequestException(
@@ -221,7 +238,7 @@ export class DiscountsService {
 
         data: {
           discountTotal: newDiscountTotal,
-
+          tipAmount,
           total: newTotal,
         },
       });
@@ -229,7 +246,7 @@ export class DiscountsService {
       await this.audit.record(tx, {
         businessId: user.businessId, locationId: bill.locationId, userId: user.userId,
         action: 'DISCOUNT_APPLIED', entityType: 'Discount', entityId: discount.id,
-        metadata: { billId: bill.id, type: discount.type, value: discount.value.toString(), amount: discount.amount.toString(), reason: discount.reason },
+        metadata: { billId: bill.id, type: discount.type, value: discount.value.toString(), amount: discount.amount.toString(), tipAmount: tipAmount.toString(), reason: discount.reason },
       });
 
       return {
@@ -242,7 +259,7 @@ export class DiscountsService {
 
           discountTotal: newDiscountTotal,
 
-          tipAmount: bill.tipAmount,
+          tipAmount,
 
           total: newTotal,
 
@@ -331,9 +348,14 @@ export class DiscountsService {
         );
       }
 
-      const newTotal = new Prisma.Decimal(bill.subtotal)
-        .sub(newDiscountTotal)
-        .add(bill.tipAmount);
+      const subtotal = new Prisma.Decimal(bill.subtotal);
+      const tipAmount = this.updateSuggestedTip(
+        subtotal,
+        currentDiscountTotal,
+        newDiscountTotal,
+        bill.tipAmount,
+      );
+      const newTotal = subtotal.sub(newDiscountTotal).add(tipAmount);
 
       if (newTotal.lessThan(0)) {
         throw new BadRequestException(
@@ -354,7 +376,7 @@ export class DiscountsService {
 
         data: {
           discountTotal: newDiscountTotal,
-
+          tipAmount,
           total: newTotal,
         },
       });
@@ -362,7 +384,7 @@ export class DiscountsService {
       await this.audit.record(tx, {
         businessId: user.businessId, locationId: bill.locationId, userId: user.userId,
         action: 'DISCOUNT_REMOVED', entityType: 'Discount', entityId: discount.id,
-        metadata: { billId: bill.id, type: discount.type, amount: discount.amount.toString(), reason: discount.reason },
+        metadata: { billId: bill.id, type: discount.type, amount: discount.amount.toString(), tipAmount: tipAmount.toString(), reason: discount.reason },
       });
 
       return {
@@ -375,7 +397,7 @@ export class DiscountsService {
 
           discountTotal: newDiscountTotal,
 
-          tipAmount: bill.tipAmount,
+          tipAmount,
 
           total: newTotal,
 

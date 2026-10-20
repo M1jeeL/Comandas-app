@@ -58,7 +58,7 @@ export class BillsService {
   private calculateOrderSubtotal(order: {
     items: Array<{
       unitPrice: Prisma.Decimal;
-      quantity: number;
+      quantity: Prisma.Decimal;
       status: string;
       modifiers: Array<{
         priceDelta: Prisma.Decimal;
@@ -125,6 +125,15 @@ export class BillsService {
       if (orders.length !== dto.orderIds.length) {
         throw new NotFoundException(
           'Una o más órdenes no existen o no pertenecen a tu negocio',
+        );
+      }
+
+      if (
+        user.role === 'WAITER' &&
+        orders.some((order) => order.waiterId !== user.userId)
+      ) {
+        throw new ForbiddenException(
+          'Solo puedes generar cuentas para pedidos de mesas asignadas a ti',
         );
       }
 
@@ -215,6 +224,8 @@ export class BillsService {
       // 8. Crear Bill + BillOrder
       // -------------------------------------------------------
 
+      const tipAmount = subtotal.mul(0.1).toDecimalPlaces(0);
+      const total = subtotal.add(tipAmount);
       const bill = await tx.bill.create({
         data: {
           locationId,
@@ -225,9 +236,9 @@ export class BillsService {
 
           discountTotal: new Prisma.Decimal(0),
 
-          tipAmount: new Prisma.Decimal(0),
+          tipAmount,
 
-          total: subtotal,
+          total,
 
           orders: {
             create: orders.map((order) => ({
@@ -285,6 +296,12 @@ export class BillsService {
         ...(locationId && {
           locationId,
         }),
+        ...(user.role === 'WAITER' && {
+          orders: {
+            some: { order: { waiterId: user.userId } },
+            every: { order: { waiterId: user.userId } },
+          },
+        }),
 
         location: {
           businessId: user.businessId,
@@ -339,10 +356,13 @@ export class BillsService {
             order: {
               include: {
                 items: {
+                  where: { status: { not: 'CANCELLED' } },
                   include: {
                     modifiers: true,
                   },
                 },
+                waiter: { select: { firstName: true, lastName: true } },
+                tableSession: { include: { table: { select: { name: true } } } },
               },
             },
           },
@@ -358,6 +378,13 @@ export class BillsService {
 
     if (!bill) {
       throw new NotFoundException('Cuenta no encontrada');
+    }
+
+    if (
+      user.role === 'WAITER' &&
+      bill.orders.some((link) => link.order.waiterId !== user.userId)
+    ) {
+      throw new ForbiddenException('Solo puedes consultar cuentas de tus mesas');
     }
 
     return bill;
@@ -382,11 +409,21 @@ export class BillsService {
 
       include: {
         payments: true,
+        orders: {
+          include: { order: { select: { waiterId: true } } },
+        },
       },
     });
 
     if (!bill) {
       throw new NotFoundException('Cuenta no encontrada');
+    }
+
+    if (
+      user.role === 'WAITER' &&
+      bill.orders.some((link) => link.order.waiterId !== user.userId)
+    ) {
+      throw new ForbiddenException('Solo puedes modificar la propina de una cuenta de tus mesas');
     }
 
     if (bill.status === BillStatus.PAID || bill.status === BillStatus.VOID) {

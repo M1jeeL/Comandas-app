@@ -107,9 +107,12 @@ export class UsersService {
   }
 
   private validateRoleAssignment(actorRole: Role, targetRole: Role) {
+    if (targetRole === Role.KITCHEN) {
+      throw new ForbiddenException('El personal de cocina no tiene acceso al sistema');
+    }
     if (actorRole === Role.OWNER) return;
     if (actorRole === Role.ADMIN && targetRole !== Role.OWNER) return;
-    const operationalRoles: Role[] = [Role.WAITER, Role.KITCHEN, Role.CASHIER];
+    const operationalRoles: Role[] = [Role.WAITER, Role.CASHIER];
     if (actorRole === Role.MANAGER && operationalRoles.includes(targetRole)) return;
     throw new ForbiddenException('No tienes permisos para asignar este rol');
   }

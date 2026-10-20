@@ -27,6 +27,9 @@ export class TableSessionsService {
    * Crear una nueva sesión.
    */
   async create(user: JwtUser, dto: CreateTableSessionDto) {
+    if (user.role === Role.WAITER && dto.waiterId !== user.userId) {
+      throw new ForbiddenException('Solo puedes abrir una mesa a tu nombre');
+    }
     try {
       return await serializableTransaction(this.prisma, async (tx) => {
         const table = await tx.restaurantTable.findFirst({
@@ -106,6 +109,7 @@ export class TableSessionsService {
     return this.prisma.tableSession.findMany({
       where: {
         status: { in: ['OPEN', 'CLOSING'] },
+        ...(user.role === Role.WAITER ? { waiterId: user.userId } : {}),
         table: {
           locationId,
         },
@@ -156,6 +160,9 @@ export class TableSessionsService {
     if (!session) {
       throw new NotFoundException('Sesión de mesa no encontrada');
     }
+    if (user.role === Role.WAITER && session.waiterId !== user.userId) {
+      throw new ForbiddenException('Solo puedes consultar una mesa asignada a ti');
+    }
 
     return session;
   }
@@ -164,30 +171,49 @@ export class TableSessionsService {
    * Cerrar una sesión.
    */
   async close(user: JwtUser, id: string) {
-    const session = await this.prisma.tableSession.findFirst({
-      where: {
-        id,
-        status: 'OPEN',
-        table: {
-          location: {
-            businessId: user.businessId,
-          },
+    return serializableTransaction(this.prisma, async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "TableSession" WHERE "id" = ${id} FOR UPDATE`;
+      const session = await tx.tableSession.findFirst({
+        where: {
+          id,
+          status: 'OPEN',
+          table: { location: { businessId: user.businessId } },
         },
-      },
-    });
+        include: { table: { select: { locationId: true } } },
+      });
+      if (!session) throw new NotFoundException('Sesión abierta no encontrada');
+      if (user.role === Role.WAITER && session.waiterId !== user.userId) {
+        throw new ForbiddenException('Solo puedes cerrar una mesa asignada a ti');
+      }
 
-    if (!session) {
-      throw new NotFoundException('Sesión abierta no encontrada');
-    }
+      const unfinishedOrders = await tx.order.count({
+        where: {
+          tableSessionId: session.id,
+          status: { notIn: [OrderStatus.CLOSED, OrderStatus.CANCELLED] },
+        },
+      });
+      if (unfinishedOrders > 0) {
+        throw new ConflictException(
+          'No se puede cerrar la mesa mientras el pedido o su cuenta sigan abiertos',
+        );
+      }
 
-    return this.prisma.tableSession.update({
-      where: {
-        id,
-      },
-      data: {
-        status: 'CLOSED',
-        closedAt: new Date(),
-      },
+      const closedAt = new Date();
+      const changed = await tx.tableSession.updateMany({
+        where: { id, status: 'OPEN' },
+        data: { status: 'CLOSED', closedAt },
+      });
+      if (changed.count !== 1) throw new ConflictException('La sesión cambió; actualiza las mesas');
+      await this.audit.record(tx, {
+        businessId: user.businessId,
+        locationId: session.table.locationId,
+        userId: user.userId,
+        action: 'TABLE_SESSION_CLOSED',
+        entityType: 'TableSession',
+        entityId: id,
+        metadata: { tableId: session.tableId, closedAt: closedAt.toISOString() },
+      });
+      return tx.tableSession.findUniqueOrThrow({ where: { id } });
     });
   }
 

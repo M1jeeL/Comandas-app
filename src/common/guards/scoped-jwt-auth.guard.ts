@@ -45,7 +45,8 @@ export class ScopedJwtAuthGuard extends JwtAuthGuard {
     const operationalReaders: Role[] = [...cash, Role.WAITER];
     let allowed: Role[] | undefined;
 
-    if (root === 'reports') allowed = managers;
+    if (root === 'assistant' || root === 'dashboard') allowed = operationalReaders;
+    else if (root === 'reports') allowed = managers;
     else if (root === 'audit-logs') allowed = managers;
     else if (root === 'businesses' || root === 'locations') allowed = owners;
     else if (root === 'users' || root === 'memberships') allowed = managers;
@@ -107,6 +108,7 @@ export class ScopedJwtAuthGuard extends JwtAuthGuard {
 
   private routeRoot(segments: string[]): string {
     const roots = [
+      'assistant', 'dashboard',
       'reports', 'audit-logs', 'users', 'memberships', 'businesses', 'locations',
       'products', 'categories', 'combos', 'combo-items', 'modifier-groups',
       'modifiers', 'product-workstations', 'workstations', 'restaurant-tables',

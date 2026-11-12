@@ -132,7 +132,7 @@ export class LocationScopeGuard implements CanActivate {
   }
 
   private routeRoot(segments: string[]): string {
-    const roots = ['reports', 'audit-logs', 'users', 'memberships', 'businesses', 'locations', 'products', 'categories', 'combos', 'combo-items', 'modifier-groups', 'modifiers', 'product-workstations', 'workstations', 'restaurant-tables', 'table-sessions', 'orders', 'preparation-tickets', 'bills', 'discounts', 'payments', 'cash-sessions', 'cash-movements', 'cash-handovers'];
+    const roots = ['dashboard', 'assistant', 'reports', 'audit-logs', 'users', 'memberships', 'businesses', 'locations', 'products', 'categories', 'combos', 'combo-items', 'modifier-groups', 'modifiers', 'product-workstations', 'workstations', 'restaurant-tables', 'table-sessions', 'orders', 'preparation-tickets', 'bills', 'discounts', 'payments', 'cash-sessions', 'cash-movements', 'cash-handovers'];
     const firstIndex = segments.findIndex((segment) => roots.includes(segment));
     if (firstIndex < 0) return '';
     const first = segments[firstIndex];

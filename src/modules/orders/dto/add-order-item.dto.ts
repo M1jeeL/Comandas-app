@@ -1,7 +1,7 @@
 import {
   ArrayUnique,
   IsArray,
-  IsNumber,
+  IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -15,8 +15,8 @@ export class AddOrderItemDto {
   @IsNotEmpty()
   productId: string;
 
-  @IsNumber({ maxDecimalPlaces: 3 })
-  @Min(0.001)
+  @IsInt()
+  @Min(1)
   @Max(999_999_999)
   quantity: number;
 

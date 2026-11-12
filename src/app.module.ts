@@ -30,6 +30,8 @@ import { AuditModule } from './modules/audit/audit.module.js';
 import { ReportsModule } from './modules/reports/reports.module.js';
 import { LocationScopeGuard } from './common/guards/location-scope.guard.js';
 import { ScopedJwtAuthGuard } from './common/guards/scoped-jwt-auth.guard.js';
+import { DashboardModule } from './modules/dashboard/dashboard.module.js';
+import { AssistantModule } from './modules/assistant/assistant.module.js';
 
 @Global()
 @Module({
@@ -62,6 +64,8 @@ import { ScopedJwtAuthGuard } from './common/guards/scoped-jwt-auth.guard.js';
     CashHandoversModule,
     AuditModule,
     ReportsModule,
+    AssistantModule,
+    DashboardModule,
   ],
   controllers: [AppController],
   providers: [AppService, PrismaService, LocationScopeGuard, ScopedJwtAuthGuard],

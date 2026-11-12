@@ -1,7 +1,7 @@
 import {
   ArrayUnique,
   IsArray,
-  IsNumber,
+  IsInt,
   IsOptional,
   IsString,
   IsUUID,
@@ -11,8 +11,8 @@ import {
 } from 'class-validator';
 
 export class UpdateOrderItemDto {
-  @IsNumber({ maxDecimalPlaces: 3 })
-  @Min(0.001)
+  @IsInt()
+  @Min(1)
   @Max(999_999_999)
   @IsOptional()
   quantity?: number;

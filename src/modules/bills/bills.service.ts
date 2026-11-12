@@ -111,6 +111,7 @@ export class BillsService {
 
             include: {
               modifiers: true,
+              product: { include: { productWorkstations: { include: { workstation: true } } } },
             },
           },
 
@@ -141,6 +142,9 @@ export class BillsService {
       // 2. Todas deben pertenecer a la misma ubicación
       // -------------------------------------------------------
 
+      if (orders.some((order) => order.type === 'TAKEAWAY' && order.status === OrderStatus.DRAFT) && orders.length !== 1) {
+        throw new ConflictException('Los pedidos para llevar se cobran individualmente');
+      }
       const locationId = orders[0]?.locationId;
 
       if (!locationId) {
@@ -170,7 +174,9 @@ export class BillsService {
       // -------------------------------------------------------
 
       for (const order of orders) {
-        const billableStatuses: OrderStatus[] = [OrderStatus.DELIVERED];
+        const billableStatuses: OrderStatus[] = order.type === 'TAKEAWAY'
+          ? [OrderStatus.DRAFT, OrderStatus.DELIVERED]
+          : [OrderStatus.DELIVERED];
 
         if (!billableStatuses.includes(order.status)) {
           throw new ConflictException(
@@ -197,6 +203,14 @@ export class BillsService {
       // -------------------------------------------------------
 
       for (const order of orders) {
+        if (order.type === 'TAKEAWAY' && order.status === OrderStatus.DRAFT) {
+          for (const item of order.items) {
+            const assignments = item.product?.productWorkstations ?? [];
+            if (item.status !== 'PENDING' || assignments.length !== 1 || assignments[0].workstation.status !== 'ACTIVE' || assignments[0].workstation.locationId !== locationId) {
+              throw new ConflictException('Verifica que todos los productos pendientes tengan una estacion activa antes de cobrar');
+            }
+          }
+        }
         if (order.items.length === 0) {
           throw new BadRequestException(
             `La orden ${order.id} no contiene items facturables`,
@@ -224,7 +238,9 @@ export class BillsService {
       // 8. Crear Bill + BillOrder
       // -------------------------------------------------------
 
-      const tipAmount = subtotal.mul(0.1).toDecimalPlaces(0);
+      const tipAmount = orders.every((order) => order.type === 'TAKEAWAY')
+        ? new Prisma.Decimal(0)
+        : subtotal.mul(0.1).toDecimalPlaces(0);
       const total = subtotal.add(tipAmount);
       const bill = await tx.bill.create({
         data: {

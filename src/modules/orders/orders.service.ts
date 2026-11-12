@@ -138,7 +138,8 @@ export class OrdersService {
     }
   }
 
-  private assertWaiterOwnsOrder(user: JwtUser, waiterId: string | null) {
+  private assertWaiterOwnsOrder(user: JwtUser, waiterId: string | null, type: OrderType) {
+    if (user.role === Role.CASHIER && type === OrderType.TAKEAWAY) return;
     if (user.role === Role.WAITER && waiterId !== user.userId) {
       throw new ForbiddenException('Solo el mesero asignado puede operar este pedido');
     }
@@ -159,12 +160,16 @@ export class OrdersService {
         include: {
           waiter: { select: { firstName: true, lastName: true } },
           tableSession: { include: { table: { select: { name: true } } } },
-          billOrders: { select: { billId: true } },
+          billOrders: { include: { bill: { select: { status: true } } } },
         },
       });
       if (!order) throw new NotFoundException('Pedido no encontrado');
-      this.assertWaiterOwnsOrder(user, order.waiterId);
-      if (order.billOrders.length > 0 || ['CLOSED', 'CANCELLED'].includes(order.status)) {
+      this.assertWaiterOwnsOrder(user, order.waiterId, order.type);
+      const paidTakeaway = order.type === OrderType.TAKEAWAY && order.billOrders.some(({ bill }) => bill.status === 'PAID');
+      if (order.type === OrderType.TAKEAWAY && !paidTakeaway) {
+        throw new ConflictException('Debes cobrar el total del pedido antes de enviarlo a cocina');
+      }
+      if ((!paidTakeaway && order.billOrders.length > 0) || ['CLOSED', 'CANCELLED'].includes(order.status)) {
         throw new ConflictException('El pedido ya no admite nuevos envíos a cocina');
       }
 
@@ -267,11 +272,15 @@ export class OrdersService {
     return serializableTransaction(this.prisma, async (tx) => {
       const order = await tx.order.findFirst({
         where: { id: orderId, location: { businessId: user.businessId } },
-        include: { billOrders: { select: { billId: true } } },
+        include: { billOrders: { include: { bill: { select: { status: true } } } } },
       });
       if (!order) throw new NotFoundException('Pedido no encontrado');
-      this.assertWaiterOwnsOrder(user, order.waiterId);
-      if (order.billOrders.length > 0 || ['CLOSED', 'CANCELLED'].includes(order.status)) {
+      this.assertWaiterOwnsOrder(user, order.waiterId, order.type);
+      const paidTakeaway = order.type === OrderType.TAKEAWAY && order.billOrders.some(({ bill }) => bill.status === 'PAID');
+      if (order.type === OrderType.TAKEAWAY && !paidTakeaway) {
+        throw new ConflictException('Debes cobrar el total del pedido antes de enviarlo a cocina');
+      }
+      if ((!paidTakeaway && order.billOrders.length > 0) || ['CLOSED', 'CANCELLED'].includes(order.status)) {
         throw new ConflictException('El pedido ya está cerrado para cambios');
       }
       const item = await tx.orderItem.findFirst({
@@ -294,7 +303,7 @@ export class OrdersService {
         ? OrderStatus.SENT
         : hasUndispatched
           ? OrderStatus.DRAFT
-          : OrderStatus.DELIVERED;
+          : paidTakeaway ? OrderStatus.CLOSED : OrderStatus.DELIVERED;
       await tx.order.update({ where: { id: orderId }, data: { status: nextOrderStatus } });
       await this.audit.record(tx, {
         businessId: user.businessId,
@@ -330,7 +339,7 @@ export class OrdersService {
         'No se pueden agregar productos a un pedido cerrado o cancelado',
       );
     }
-    this.assertWaiterOwnsOrder(user, order.waiterId);
+    this.assertWaiterOwnsOrder(user, order.waiterId, order.type);
     if (order.type !== OrderType.DINE_IN && order.status !== OrderStatus.DRAFT) {
       throw new ConflictException('Solo se pueden agregar productos a un pedido para llevar en borrador');
     }
@@ -465,6 +474,11 @@ export class OrdersService {
 
     if (!order) {
       throw new NotFoundException('Pedido no encontrado');
+    }
+
+    this.assertWaiterOwnsOrder(user, order.waiterId, order.type);
+    if (await this.prisma.billOrder.findFirst({ where: { orderId: order.id } })) {
+      throw new ConflictException('La cuenta ya fue solicitada; no se pueden editar productos');
     }
 
     const item = await this.prisma.orderItem.findFirst({
@@ -623,7 +637,7 @@ export class OrdersService {
         'Solo se pueden quitar productos que aún no se hayan impreso',
       );
     }
-    this.assertWaiterOwnsOrder(user, order.waiterId);
+    this.assertWaiterOwnsOrder(user, order.waiterId, order.type);
     if (await this.prisma.billOrder.findFirst({ where: { orderId: order.id } })) {
       throw new ConflictException('La cuenta ya fue solicitada; no se pueden quitar productos');
     }
@@ -666,7 +680,7 @@ export class OrdersService {
         },
       });
       if (!order) throw new NotFoundException('Pedido no encontrado');
-      this.assertWaiterOwnsOrder(user, order.waiterId);
+      this.assertWaiterOwnsOrder(user, order.waiterId, order.type);
       const item = await tx.orderItem.findFirst({
         where: { id: itemId, orderId },
       });
@@ -1023,6 +1037,10 @@ export class OrdersService {
         where: { id, location: { businessId: user.businessId } },
       });
       if (!order) throw new NotFoundException('Pedido no encontrado');
+      this.assertWaiterOwnsOrder(user, order.waiterId, order.type);
+      if (await tx.billOrder.findFirst({ where: { orderId: order.id } })) {
+        throw new ConflictException('No se puede cancelar un pedido con cuenta; revisa sus pagos primero');
+      }
       this.validateStatusTransition(order.status, OrderStatus.CANCELLED);
       if (user.role === Role.WAITER && order.waiterId !== user.userId) {
         throw new ForbiddenException(
